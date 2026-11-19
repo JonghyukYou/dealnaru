@@ -1845,7 +1845,25 @@
 
 .admin-log-pagination {
   margin-top: 14px;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px;
 }
+
+.log-page-buttons, .log-page-jump, .admin-log-toolbar, .log-size-control {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.admin-log-toolbar { justify-content: space-between; margin-bottom: 12px; }
+.admin-log-toolbar p { margin: 0; }
+.admin-log-toolbar label, .log-page-jump label { font-size: 14px; }
+.admin-log-toolbar select { width: auto; margin-left: 6px; }
+.log-page-jump { margin: 0; }
+.log-page-jump input { width: 86px; padding: 8px; }
+.log-page-gap { padding: 0 4px; }
 
 .log-table {
   table-layout: fixed;
@@ -1863,7 +1881,9 @@
 
 .log-table th:nth-child(2),
 .log-table td:nth-child(2) {
-  width: 110px;
+  width: 150px;
+  white-space: nowrap;
+  word-break: normal;
 }
 
 .log-table th:nth-child(3),

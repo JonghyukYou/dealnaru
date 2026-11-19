@@ -97,6 +97,7 @@ from app.services.used_market_collect_service import (
     remove_retired_market_data,
 )
 from app.utils.time import to_kst_iso, to_utc_iso_z, utc_now
+from app.services.crawling_log_service import LOG_RETENTION_DAYS, prune_crawling_logs
 from app.settings import (
     ALLOWED_ORIGINS,
     EMAIL_VERIFICATION_REQUIRED,
@@ -123,6 +124,12 @@ async def lifespan(_app: FastAPI):
     with engine.begin() as connection:
         connection.execute(
             text(
+                "CREATE INDEX IF NOT EXISTS ix_crawling_logs_start_time "
+                "ON crawling_logs (start_time)"
+            )
+        )
+        connection.execute(
+            text(
                 "CREATE INDEX IF NOT EXISTS ix_price_snapshots_game_current "
                 "ON price_snapshots (game_id, is_current)"
             )
@@ -136,6 +143,7 @@ async def lifespan(_app: FastAPI):
 
     cleanup_db = SessionLocal()
     try:
+        prune_crawling_logs(cleanup_db)
         delete_stale_used_market_items(cleanup_db)
         remove_retired_market_data(cleanup_db)
         repair_used_market_titles(cleanup_db)
@@ -1946,6 +1954,8 @@ def list_crawling_logs(
     if page_size > 50:
         page_size = 50
 
+    if prune_crawling_logs(db):
+        db.commit()
     total = db.query(CrawlingLog).count()
     total_pages = max(1, (total + page_size - 1) // page_size)
 
@@ -1955,7 +1965,7 @@ def list_crawling_logs(
     logs = (
         db.query(CrawlingLog)
         .options(joinedload(CrawlingLog.platform))
-        .order_by(CrawlingLog.start_time.desc())
+        .order_by(CrawlingLog.start_time.desc(), CrawlingLog.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -1967,6 +1977,7 @@ def list_crawling_logs(
         "page": page,
         "page_size": page_size,
         "total_pages": total_pages,
+        "retention_days": LOG_RETENTION_DAYS,
     }
 
 

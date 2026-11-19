@@ -3,6 +3,7 @@
 import json
 import logging
 import os
+import time
 from datetime import timedelta
 from threading import Event, Thread
 from uuid import uuid4
@@ -13,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 from app.database import SessionLocal
 from app.models import AutoRefreshState, CrawlingLog, Game, Platform
 from app.services.catalog_filter_service import cleanup_invalid_catalog
+from app.services.crawling_log_service import prune_crawling_logs
 from app.services.catalog_sync_service import (
     enrich_itad_catalog_metadata,
     link_catalog_to_itad,
@@ -27,6 +29,7 @@ from app.services.itad_collect_service import (
     import_itad_deals,
 )
 from app.services.price_freshness_service import deactivate_stale_current_prices
+from app.services.source_request_service import collection_error_detail, collection_result_error
 from app.services.steam_collect_service import (
     collect_existing_steam_prices,
     collect_steam_featured_games,
@@ -274,6 +277,9 @@ def run_logged_collection(platform_name, label, callback):
             log.end_time = utc_now()
             log.rows_count = rows
             log.message = f"자동 갱신: {label} · 갱신 {rows}개 · 제외 {result.get('skipped_count', 0)}개 · 오류 {error_count}개"
+            reason = collection_result_error(result)
+            if reason:
+                log.message += f" · {reason}"
             db.commit()
             return {
                 "source": label,
@@ -283,20 +289,23 @@ def run_logged_collection(platform_name, label, callback):
                 "skipped_count": result.get("skipped_count", 0),
                 "games_synced": result.get("games_synced", 0),
                 "skip_reasons": result.get("skip_reasons", {}),
+                "message": reason,
             }
-        except Exception:
+        except Exception as error:
             db.rollback()
             logger.exception("자동 갱신 출처 실패: %s", label)
             log = db.get(CrawlingLog, log_id)
             log.status = "FAIL"
             log.end_time = utc_now()
-            log.message = f"자동 갱신: {label} 실패. 연결·API 설정을 확인하세요."
+            reason = collection_error_detail(error)
+            log.message = f"자동 갱신: {label} 실패 · {reason}"
             db.commit()
             return {
                 "source": label,
                 "status": "FAIL",
                 "error_count": 1,
                 "updated_count": 0,
+                "message": reason,
             }
 
 
@@ -444,8 +453,14 @@ def run_auto_collect_once():
 
 
 def _loop():
+    next_log_cleanup = 0.0
     while not _stop.is_set():
         try:
+            if time.monotonic() >= next_log_cleanup:
+                with SessionLocal() as db:
+                    prune_crawling_logs(db)
+                    db.commit()
+                next_log_cleanup = time.monotonic() + 3600
             run_auto_collect_once()
         except Exception:
             logger.exception("자동 갱신 스케줄 확인 실패; 다음 확인에서 재시도")

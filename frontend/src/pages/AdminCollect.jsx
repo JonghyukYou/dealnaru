@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import api, { apiError } from "../api/client";
 import { publicDeployment } from "../utils/site-config";
 import RequestedGameCollector from "../components/RequestedGameCollector";
+import LogPagination from "../components/LogPagination";
 
 const COLLECTION_TIMEOUT_MS = 180000;
 
@@ -56,11 +57,14 @@ function AdminCollect() {
   const [isChangingPrice, setIsChangingPrice] = useState(false);
 
   const [logPage, setLogPage] = useState(1);
+  const [logPageSize, setLogPageSize] = useState(10);
   const [logTotalPages, setLogTotalPages] = useState(1);
   const [logTotal, setLogTotal] = useState(0);
+  const latestRequest = useRef(0);
 
   const fetchAdminData = useCallback(
     async ({ showLoading = false, showAlert = true, page = logPage } = {}) => {
+      const requestId = ++latestRequest.current;
       if (showLoading) {
         setIsLoading(true);
       }
@@ -68,17 +72,19 @@ function AdminCollect() {
       try {
         const [logsResult, gamesResult, scheduleResult] = await Promise.allSettled([
           api.get("/api/admin/crawling-logs", {
-            params: { page, page_size: 10 },
+            params: { page, page_size: logPageSize },
           }),
           publicDeployment ? Promise.resolve({ data: [] }) : api.get("/api/admin/game-options"),
           api.get("/api/admin/auto-refresh"),
         ]);
 
+        if (requestId !== latestRequest.current) return;
         if (logsResult.status === "fulfilled") {
           const logData = logsResult.value.data;
           setLogs(logData.items || []);
           setLogTotal(logData.total || 0);
           setLogTotalPages(logData.total_pages || 1);
+          setLogPage(logData.page || 1);
         } else {
           console.error("logs error:", logsResult.reason);
           setLogs([]);
@@ -121,12 +127,10 @@ function AdminCollect() {
           alert("관리자 데이터를 불러오는 중 오류가 발생했습니다.");
         }
       } finally {
-        if (showLoading) {
-          setIsLoading(false);
-        }
+        if (requestId === latestRequest.current) setIsLoading(false);
       }
     },
-    [logPage]
+    [logPage, logPageSize]
   );
 
   const refreshAfterAction = async () => {
@@ -246,7 +250,7 @@ function AdminCollect() {
   };
 
   useEffect(() => {
-    fetchAdminData({ showLoading: true });
+    fetchAdminData();
   }, [fetchAdminData]);
 
   useEffect(() => {
@@ -336,7 +340,7 @@ function AdminCollect() {
         <div className="auto-refresh-times"><p>다음 갱신 <strong>{formatKoreanDateTime(schedule?.next_run_at)}</strong></p><p>최근 완료 <strong>{formatKoreanDateTime(schedule?.last_finished_at)}</strong></p><p>최근 결과 <strong>{schedule?.last_status || "-"}</strong></p></div>
         <div className="auto-refresh-times"><p>전체 게임 <strong>{schedule?.catalog_game_count || 0}개</strong></p><p>ITAD 연결 <strong>{schedule?.itad_linked_count || 0}개</strong></p><p>최초 이력 대기 <strong>{schedule?.history_pending_count || 0}개</strong></p><p>이력 재확인 <strong>{schedule?.history_failed_count || 0}개</strong></p></div>
         <div className="auto-refresh-times"><p>이력 수집 대기 <strong>{schedule?.history_queued_count || 0}개</strong></p><p>이력 수집 중 <strong>{schedule?.history_running_count || 0}개</strong></p></div>
-        {schedule?.last_result?.steps && <div className="auto-refresh-results">{schedule.last_result.steps.map((step, index) => <span key={`${step.source}-${index}`} className={`offer-status ${step.status === "FAIL" ? "needs_check" : "reference"}`}>{step.source}: {step.status} {step.updated_count !== undefined ? `· ${step.updated_count}개` : step.message}</span>)}</div>}
+        {schedule?.last_result?.steps && <div className="auto-refresh-results">{schedule.last_result.steps.map((step, index) => <span key={`${step.source}-${index}`} className={`offer-status ${step.status === "FAIL" || step.status === "PARTIAL" ? "needs_check" : "reference"}`}>{step.source}: {step.status}{step.updated_count !== undefined && ` · ${step.updated_count}개`}{step.message && ` · ${step.message}`}</span>)}</div>}
       </section>
 
       <section className="panel collection-console">
@@ -512,9 +516,12 @@ function AdminCollect() {
 
         <article className="panel">
           <h2>수집 로그</h2>
-          <p className="notice-text">
-            전체 {logTotal}개 · {logPage} / {logTotalPages} 페이지
-          </p>
+          <div className="admin-log-toolbar">
+            <p className="notice-text">최근 3일 로그 {logTotal}개 · {logPage} / {logTotalPages} 페이지<br />진행 중인 작업을 제외한 72시간 이전 로그는 자동 삭제됩니다.</p>
+            <div className="log-size-control"><label htmlFor="admin-log-page-size">표시 개수</label><select id="admin-log-page-size" value={logPageSize} onChange={(event) => { setLogPage(1); setLogPageSize(Number(event.target.value)); }}>
+              {[10, 25, 50].map((size) => <option key={size} value={size}>{size}개씩</option>)}
+            </select></div>
+          </div>
 
           {logs.length === 0 ? (
             <p className="notice-text">아직 수집 로그가 없습니다.</p>
@@ -556,23 +563,7 @@ function AdminCollect() {
           )}
 
           {logTotalPages > 1 && (
-            <div className="pagination admin-log-pagination">
-              <button
-                disabled={logPage === 1}
-                onClick={() => setLogPage((current) => Math.max(1, current - 1))}
-              >
-                이전
-              </button>
-              <span className="pagination-current">{logPage}</span>
-              <button
-                disabled={logPage === logTotalPages}
-                onClick={() =>
-                  setLogPage((current) => Math.min(logTotalPages, current + 1))
-                }
-              >
-                다음
-              </button>
-            </div>
+            <LogPagination page={logPage} totalPages={logTotalPages} onChange={setLogPage} />
           )}
         </article>
       </section>

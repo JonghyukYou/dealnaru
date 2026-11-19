@@ -21,12 +21,20 @@ from app.services.catalog_filter_service import non_game_reason
 from app.services.collection_service import update_game_price_and_notify
 from app.services.content_filter_service import is_explicit_adult_itad_item
 from app.services.price_policy_service import excessive_discount_reason
+from app.services.source_request_service import (
+    SourceRequestError,
+    SourceRequestGate,
+    collection_error_detail,
+    retry_after_seconds,
+)
 from app.utils.time import utc_now
 
 load_dotenv()
 
 ITAD_API_KEY = os.getenv("ITAD_API_KEY")
 BASE_URL = "https://api.isthereanydeal.com"
+# 자동 갱신·이력 보강·관리자 요청이 하나의 요청 간격/대기 시간을 공유합니다.
+request_gate = SourceRequestGate("ITAD", interval=0.4)
 
 HEADERS = {
     "User-Agent": "GameDiscountPredictor-Capstone/1.0",
@@ -143,6 +151,7 @@ def require_api_key():
 
 def itad_request(method, path, params=None, json_body=None):
     require_api_key()
+    request_gate.wait()
 
     headers = {
         **HEADERS,
@@ -160,7 +169,14 @@ def itad_request(method, path, params=None, json_body=None):
     )
 
     if not 200 <= response.status_code < 300:
-        raise RuntimeError(f"ITAD 응답 오류 (HTTP {response.status_code}).")
+        retry_after = 0
+        if response.status_code == 429:
+            retry_after = retry_after_seconds(response.headers.get("Retry-After"))
+            request_gate.pause(retry_after)
+        elif response.status_code in {401, 403}:
+            retry_after = 300
+            request_gate.pause(retry_after, response.status_code)
+        raise SourceRequestError("ITAD", response.status_code, retry_after)
     return response.json()
 
 
@@ -969,9 +985,7 @@ def collect_history_for_existing_itad_games(
                 raise ValueError("이력 목록이 없는 오류 응답")
             return gid, since_at, normalize_history_response(response), None
         except Exception as error:
-            status = getattr(getattr(error, "response", None), "status_code", None)
-            detail = f"HTTP {status}" if status else type(error).__name__
-            return gid, since_at, [], detail
+            return gid, since_at, [], collection_error_detail(error)
 
     result = {
         "history_rows_imported": 0,

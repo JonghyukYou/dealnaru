@@ -16,6 +16,7 @@ from app.database import SessionLocal
 from app.models import CrawlingLog, Game, Platform, PriceSnapshot
 from app.services import itad_collect_service as itad
 from app.services.catalog_sync_service import link_catalog_to_itad
+from app.services.source_request_service import collection_error_detail
 from app.utils.time import utc_now
 
 logger = logging.getLogger(__name__)
@@ -127,7 +128,7 @@ def claim_next_history_job(db):
 
 
 def run_next_history_job():
-    if not has_history_key():
+    if not has_history_key() or itad.request_gate.retry_after():
         return None
     with SessionLocal() as db:
         job = claim_next_history_job(db)
@@ -193,19 +194,21 @@ def run_next_history_job():
             )
             log.end_time = utc_now()
             log.message = f"가격 이력 우선 보강: {title} · 실제 변경 이력 {log.rows_count}건 · 오류 {result.get('error_count', 0)}개"
+            if result.get("error_count") and game is not None and game.history_error:
+                log.message += f" · {game.history_error}"
             db.commit()
         except Exception as error:
             db.rollback()
             game = db.get(Game, gid)
             if game and game.history_lease_token == token:
                 game.history_attempted_at = utc_now()
-                game.history_error = f"가격 이력 보강 실패: {type(error).__name__}"
+                game.history_error = f"가격 이력 보강 실패: {collection_error_detail(error)}"
             log = db.get(CrawlingLog, log_id)
             if log:
                 log.status = "FAIL"
                 log.end_time = utc_now()
                 log.message = (
-                    f"가격 이력 우선 보강 실패: {title} · {type(error).__name__}"
+                    f"가격 이력 우선 보강 실패: {title} · {collection_error_detail(error)}"
                 )
             db.commit()
             result = {"history_rows_imported": 0, "error_count": 1}
@@ -233,6 +236,12 @@ def history_worker_active():
 def _loop():
     while not _stop.is_set():
         try:
+            retry_after = itad.request_gate.retry_after()
+            if retry_after:
+                # 제한 중에는 다음 게임을 꺼내지 않아 동일 오류가 수백 줄 쌓이지 않습니다.
+                _wake.wait(min(30, retry_after))
+                _wake.clear()
+                continue
             with SessionLocal() as db:
                 queue_history_sync(db, include_due=False)
                 db.commit()

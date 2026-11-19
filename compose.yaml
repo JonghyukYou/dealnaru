@@ -99,6 +99,7 @@ volumes:
 networks:
   edge:
     ipam:
-      config: [{subnet: 172.30.223.0/24}]
+      # Keep automatic allocations separate from the web proxy's fixed address.
+      config: [{subnet: 172.30.223.0/24, ip_range: 172.30.223.128/25}]
   data:
     internal: true

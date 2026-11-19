@@ -11,6 +11,7 @@ from app.models import Game, PriceSnapshot
 from app.services import itad_collect_service as itad
 from app.services.catalog_filter_service import non_game_reason
 from app.services.content_filter_service import is_explicit_adult_itad_item
+from app.services.source_request_service import collection_error_detail
 from app.utils.time import utc_now
 
 
@@ -144,7 +145,7 @@ def link_catalog_to_itad(db, limit=80, game_ids=None):
                 info = itad.fetch_itad_game_info(candidate["id"])
             return gid, info, None
         except Exception as error:
-            return gid, None, type(error).__name__
+            return gid, None, collection_error_detail(error)
 
     result = {"updated_count": 0, "skipped_count": 0, "error_count": 0, "errors": []}
     with ThreadPoolExecutor(max_workers=4) as pool:
@@ -215,9 +216,9 @@ def enrich_itad_catalog_metadata(db, limit=80):
         try:
             return game.id, itad.fetch_itad_game_info(game.itad_id), None
         except Exception as error:
-            return game.id, None, type(error).__name__
+            return game.id, None, collection_error_detail(error)
 
-    result = {"updated_count": 0, "skipped_count": 0, "error_count": 0}
+    result = {"updated_count": 0, "skipped_count": 0, "error_count": 0, "errors": []}
     with ThreadPoolExecutor(max_workers=4) as pool:
         for gid, info, error in pool.map(fetch, games):
             game = db.get(Game, gid)
@@ -226,6 +227,8 @@ def enrich_itad_catalog_metadata(db, limit=80):
             game.itad_lookup_checked_at = utc_now()
             if error or not info or not info.get("id"):
                 result["error_count"] += 1
+                if len(result["errors"]) < 10:
+                    result["errors"].append({"title": game.title, "error": error or "ITAD 게임 정보 없음"})
                 continue
             if (
                 info.get("type") != "game"
