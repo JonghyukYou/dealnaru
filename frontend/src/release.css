@@ -1,0 +1,125 @@
+/* Public release: give navigation, listings and prices a stable visual hierarchy. */
+:root {
+  --bg: #f8f9f8;
+  --surface-soft: #eef3f0;
+  --line: #dce4df;
+  --text: #212c29;
+  --muted: #50625a;
+  --primary: #23614e;
+  --primary-dark: #174737;
+  --shadow: none;
+}
+.site-header {
+  top: 0;
+  margin: 0 24px;
+  padding: 12px 12px;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: var(--bg);
+}
+.nav a { border-radius: 4px; }
+.nav a.active { background: transparent; color: var(--primary-dark); box-shadow: inset 0 -2px var(--primary); }
+.nav a svg { display: none; }
+.brand-mark { width: 38px; height: 38px; }
+.logo-text strong { font-size: 23px; }
+.home-intro {
+  display: block;
+  padding: 34px 0 27px;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  margin-bottom: 25px;
+}
+.home-intro h1 { margin: 0 0 10px; font-size: clamp(27px, 3.3vw, 39px); }
+.home-search {
+  margin-top: 19px;
+  padding: 0;
+  max-width: 760px;
+  border: 0;
+  background: transparent;
+}
+.home-search-tabs { gap: 18px; justify-content: flex-start; margin: 0 0 8px; }
+.home-search-tabs button {
+  flex: none;
+  padding: 7px 0;
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+.home-search-tabs button.active { background: transparent; color: var(--primary-dark); border-bottom: 2px solid var(--primary); }
+.main-search-box, .main-search-box button, .login-button, .primary-button, .secondary-button { border-radius: 6px; }
+.panel, .section, .filter-panel, .empty-panel, .auth-box, .software-search-panel, .genre-tabs,
+.notification-card, .wishlist-manage-card, .wide-game-card, .subscription-card, .software-plan-card,
+.used-market-card, .today-deal-card, .recommend-card, .small-game-card { border-radius: 8px; box-shadow: none; }
+.home-page .restored-recommendations { margin-bottom: 18px; }
+.home-page .popular-section { padding: 22px 0 0; background: transparent; border: 0; border-top: 1px solid var(--line); }
+.home-page .popular-section .subscription-notice { margin: 0 0 12px; background: none; padding: 0; }
+.footer {
+  display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap;
+  padding: 22px 0; margin: 24px 32px 0; background: transparent;
+  border: 0; border-top: 1px solid var(--line); border-radius: 0;
+  color: var(--muted); font-size: 13px;
+}
+.footer-caption, .footer-links { display: flex; flex-wrap: wrap; gap: 9px 16px; align-items: center; }
+.footer-links a:hover { text-decoration: underline; }
+.policy-document { max-width: 760px; margin: 0 auto; padding: 8px 0 18px; }
+.policy-document h1 { margin: 0 0 4px; }
+.policy-document h2 { margin: 24px 0 6px; font-size: 19px; }
+.policy-document p { line-height: 1.85; margin: 0 0 10px; }
+.policy-document a, .terms-checkbox a, .auth-form .policy-meta a { color: var(--primary-dark); text-decoration: underline; }
+.policy-meta { color: var(--muted); font-size: 13px; }
+.auth-form label.terms-checkbox { display: flex; flex-direction: row; align-items: center; gap: 8px; }
+.auth-form label.terms-checkbox input { width: 16px; height: 16px; accent-color: var(--primary); flex-shrink: 0; }
+.auth-form .policy-meta { margin: 0; }
+.form-error, .account-message { color: #963b31; }
+.account-message { margin: 12px 32px; }
+.admin-layout.production-layout { grid-template-columns: minmax(0, 1fr); }
+@media (max-width: 640px) {
+  .site-header { margin: 0 12px; padding: 10px 4px; }
+  .home-intro { padding: 15px 0 20px; }
+  .home-search { padding: 0; }
+  .footer { margin: 18px 16px 0; }
+}
+
+/* Price comparison, source status and policy details. */
+.market-filters, .software-budget-filters { display: flex; flex-wrap: wrap; gap: 16px; align-items: end; margin: 16px 0; }
+.market-filters { justify-content: space-between; }
+.software-budget-filters label, .market-filters label, .withdrawal-panel form > label { display: flex; flex-direction: column; gap: 7px; font-size: 14px; }
+.software-budget-filters input, .software-budget-filters select, .market-filters select, .withdrawal-panel input[type="password"] { min-height: 42px; padding: 8px 12px; border: 1px solid var(--line); border-radius: 6px; background: var(--surface, #fff); color: var(--text); font: inherit; max-width: 100%; }
+label.inline-checkbox { display: flex; flex-direction: row; align-items: center; gap: 8px; min-height: 42px; }
+.inline-checkbox input { width: 18px; height: 18px; accent-color: var(--primary); }
+.market-external-links { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; font-size: 14px; }
+.market-external-links a { color: var(--primary-dark); text-decoration: underline; }
+.market-external-links span { color: var(--muted); }
+.market-lowest-summary { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 20px 24px; margin: 20px 0; border: 1px solid #78aea3; border-radius: 8px; background: #f0faf7; }
+.market-lowest-summary strong { display: block; font-size: 28px; color: #125e50; }
+.market-lowest-summary p { margin: 0; font-size: 14px; }
+.used-market-card.is-lowest { border: 2px solid #26836e; background: #f8fffc; }
+.market-lowest-badge { padding: 5px 9px; background: #166c59; color: #fff; border-radius: 4px; font-size: 14px; font-weight: 700; }
+.collection-source-results { border-left: 3px solid var(--primary); padding: 4px 16px; margin-top: 12px; font-size: 14px; }
+.prediction-method { margin-top: 20px; border-top: 1px solid var(--line); padding-top: 16px; }
+.prediction-method summary { cursor: pointer; font-weight: 700; }
+.prediction-method dl > div { display: grid; grid-template-columns: 140px 1fr; gap: 12px; margin: 12px 0; }
+.prediction-method dt { color: var(--muted); }
+.prediction-method dd { margin: 0; }
+.prediction-method p { font-size: 14px; line-height: 1.75; }
+.policy-document { max-width: 920px; font-size: 16px; }
+.policy-document h2 { scroll-margin-top: 100px; }
+.policy-toc { display: flex; flex-wrap: wrap; gap: 10px 18px; padding: 16px 0; }
+.policy-table-scroll { overflow-x: auto; margin: 18px 0; }
+.policy-table { width: 100%; min-width: 580px; border-collapse: collapse; font-size: 14px; line-height: 1.75; }
+.policy-table th, .policy-table td { padding: 12px; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.policy-table th { background: #eef6f3; }
+.policy-table th:first-child { min-width: 130px; }
+.withdrawal-panel { border: 1px solid var(--line); border-radius: 8px; padding: 20px; margin: 20px 0; }
+.withdrawal-panel form { display: grid; gap: 12px; }
+.withdrawal-panel input[type="password"] { max-width: 360px; }
+.danger-button { background: #9a342e; color: #fff; border: 0; border-radius: 6px; padding: 12px 18px; width: fit-content; }
+.danger-button:disabled { opacity: .55; cursor: not-allowed; }
+@media (max-width: 640px) {
+  .software-budget-filters > label { width: 100%; }
+  .software-budget-filters input, .software-budget-filters select { width: 100%; }
+  .prediction-method dl > div { grid-template-columns: 1fr; gap: 3px; }
+  .market-lowest-summary { padding: 16px; }
+}
