@@ -22,6 +22,7 @@ def reset_game_prices(db, apply=False):
             Game.history_attempted_at: None,
             Game.history_start_at: None,
             Game.history_error: None,
+            Game.history_retry_at: None,
             Game.history_queued_at: None,
             Game.history_priority: 0,
             Game.history_lease_token: None,

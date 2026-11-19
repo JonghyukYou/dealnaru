@@ -2,7 +2,7 @@ import re
 import time
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 
 import requests
@@ -13,6 +13,10 @@ from app.models import Game, GameTag, Platform, PriceSnapshot
 from app.services.catalog_filter_service import non_game_reason
 from app.services.collection_service import update_game_price_and_notify
 from app.services.content_filter_service import is_explicit_adult_steam_game
+from app.utils.time import utc_now
+from app.services.source_request_service import SourceRequestError, SourceRequestGate, retry_after_seconds, collection_error_status
+
+request_gate = SourceRequestGate("Steam", interval=1.6, persistent=True)
 
 STEAM_FEATURED_URL = "https://store.steampowered.com/api/featuredcategories"
 STEAM_APPDETAILS_URL = "https://store.steampowered.com/api/appdetails"
@@ -23,6 +27,19 @@ HEADERS = {
     "User-Agent": "GameDiscountPredictor-Capstone/1.0",
     "Accept": "application/json",
 }
+
+
+def steam_request(url, **kwargs):
+    request_gate.wait()
+    response = requests.get(url, **kwargs)
+    code = getattr(response, "status_code", 200)
+    if code in {401, 403, 429, 500, 502, 503, 504}:
+        delay = retry_after_seconds(getattr(response, "headers", {}).get("Retry-After"),
+                                    default=900 if code in {401, 403} else 300)
+        request_gate.pause(delay, code)
+        raise SourceRequestError("Steam", code, delay)
+    response.raise_for_status()
+    return response
 
 
 def steam_price_to_krw(value):
@@ -51,7 +68,7 @@ def get_or_create_steam_platform(db):
 
 
 def fetch_steam_featured_appids(country="kr", language="korean"):
-    response = requests.get(
+    response = steam_request(
         STEAM_FEATURED_URL,
         params={
             "cc": country,
@@ -109,7 +126,7 @@ def fetch_steam_search_appids(country="kr", language="korean", count=100):
     """추천 목록의 적은 후보 수를 Steam 할인 검색으로 보완합니다."""
     appids = []
     for start in range(0, min(count, 400), 100):
-        response = requests.get(
+        response = steam_request(
             STEAM_SEARCH_URL,
             params={"specials": 1, "category1": 998, "start": start,
                     "count": 100, "json": 1, "cc": country, "l": language, "ndl": 1},
@@ -127,7 +144,7 @@ def fetch_steam_popular_appids(country="kr", language="korean", count=100):
     """공식 인기 판매 검색. specials 조건을 넣지 않아 정상가 게임도 포함합니다."""
     appids = []
     for start in range(0, min(count, 400), 100):
-        response = requests.get(STEAM_SEARCH_URL,
+        response = steam_request(STEAM_SEARCH_URL,
             params={"filter": "topsellers", "category1": 998, "start": start, "count": 100,
                     "json": 1, "cc": country, "l": language, "ndl": 1}, headers=HEADERS, timeout=15)
         response.raise_for_status()
@@ -136,7 +153,7 @@ def fetch_steam_popular_appids(country="kr", language="korean", count=100):
         if row_count < 100:
             break
     if not appids:
-        response = requests.get("https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/", headers=HEADERS, timeout=15)
+        response = steam_request("https://api.steampowered.com/ISteamChartsService/GetMostPlayedGames/v1/", headers=HEADERS, timeout=15)
         response.raise_for_status()
         appids = [int(row["appid"]) for row in (response.json().get("response") or {}).get("ranks") or [] if row.get("appid")]
     return list(dict.fromkeys(appids))
@@ -146,7 +163,7 @@ def fetch_steam_app_details(appid, country="kr", language="korean", include_reas
     def skip(reason):
         return {"_skip_reason": reason} if include_reason else None
 
-    response = requests.get(
+    response = steam_request(
         STEAM_APPDETAILS_URL,
         params={
             "appids": appid,
@@ -308,6 +325,7 @@ def collect_steam_featured_games(
     delay_seconds=0.1,
     catalog_mode=False,
 ):
+    request_gate.ensure_available()
     get_or_create_steam_platform(db)
 
     imported = []
@@ -369,6 +387,8 @@ def collect_steam_featured_games(
                     errors.append({"appid": appid, "error": str(error)})
             if delay_seconds:
                 time.sleep(delay_seconds)
+            if request_gate.retry_after():
+                break
 
     return {
         "imported_count": len(imported),
@@ -381,6 +401,8 @@ def collect_steam_featured_games(
         "requested_count": max_items,
         "skip_reasons": dict(Counter(item["reason"] for item in skipped)),
         "source_warnings": source_warnings,
+        "status": ("PARTIAL" if imported else collection_error_status(errors[0]["error"]))
+            if errors and request_gate.retry_after() else (("PARTIAL" if imported else "FAIL") if errors else "SUCCESS"),
     }
 
 
@@ -392,6 +414,7 @@ def collect_existing_steam_prices(
     delay_seconds=0.4,
     offset=0,
 ):
+    request_gate.ensure_available()
     get_or_create_steam_platform(db)
 
     games = (
@@ -402,6 +425,19 @@ def collect_existing_steam_prices(
         .limit(max_items)
         .all()
     )
+
+    recently_checked = set()
+    if country.lower() == "kr" and games:
+        recently_checked = {gid for (gid,) in db.query(PriceSnapshot.game_id).filter(
+            PriceSnapshot.game_id.in_([game.id for game in games]),
+            PriceSnapshot.is_current.is_(True),
+            PriceSnapshot.source == "itad-current",
+            PriceSnapshot.currency == "KRW",
+            PriceSnapshot.collected_at >= utc_now() - timedelta(minutes=10),
+            PriceSnapshot.platform.has(Platform.name == "Steam"),
+        ).distinct().all()}
+    # offset은 전체 게임에 적용한 뒤 중복 조회만 생략하므로 다음 묶음을 건너뛰지 않습니다.
+    games = [game for game in games if game.id not in recently_checked]
 
     updated = []
     skipped = []
@@ -435,12 +471,18 @@ def collect_existing_steam_prices(
                     errors.append({"game_id": game.id, "error": str(error)})
             if delay_seconds:
                 time.sleep(delay_seconds)
+            if request_gate.retry_after():
+                break
 
     return {
         "updated_count": len(updated),
+        "reused_count": len(recently_checked),
+        "message": f"Steam 가격 {len(recently_checked)}개는 ITAD에서 최근 확인한 값을 유지했습니다." if recently_checked else None,
         "skipped_count": len(skipped),
         "error_count": len(errors),
         "updated": updated,
         "skipped": skipped[:10],
         "errors": errors[:10],
+        "status": ("PARTIAL" if updated else collection_error_status(errors[0]["error"]))
+            if errors and request_gate.retry_after() else (("PARTIAL" if updated else "FAIL") if errors else "SUCCESS"),
     }

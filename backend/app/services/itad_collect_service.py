@@ -26,6 +26,7 @@ from app.services.source_request_service import (
     SourceRequestGate,
     collection_error_detail,
     retry_after_seconds,
+    response_error_detail,
 )
 from app.utils.time import utc_now
 
@@ -34,7 +35,7 @@ load_dotenv()
 ITAD_API_KEY = os.getenv("ITAD_API_KEY")
 BASE_URL = "https://api.isthereanydeal.com"
 # 자동 갱신·이력 보강·관리자 요청이 하나의 요청 간격/대기 시간을 공유합니다.
-request_gate = SourceRequestGate("ITAD", interval=0.4)
+request_gate = SourceRequestGate("ITAD", interval=1.0, persistent=True)
 
 HEADERS = {
     "User-Agent": "GameDiscountPredictor-Capstone/1.0",
@@ -169,14 +170,18 @@ def itad_request(method, path, params=None, json_body=None):
     )
 
     if not 200 <= response.status_code < 300:
+        detail = response_error_detail(response, secrets=(ITAD_API_KEY,)) if response.status_code == 400 else None
         retry_after = 0
         if response.status_code == 429:
             retry_after = retry_after_seconds(response.headers.get("Retry-After"))
-            request_gate.pause(retry_after)
+            request_gate.pause(retry_after, detail=detail)
         elif response.status_code in {401, 403}:
             retry_after = 300
-            request_gate.pause(retry_after, response.status_code)
-        raise SourceRequestError("ITAD", response.status_code, retry_after)
+            request_gate.pause(retry_after, response.status_code, detail=detail)
+        elif response.status_code in {500, 502, 503, 504}:
+            retry_after = retry_after_seconds(response.headers.get("Retry-After"), default=60)
+            request_gate.pause(retry_after, response.status_code, detail=detail)
+        raise SourceRequestError("ITAD", response.status_code, retry_after, detail=detail)
     return response.json()
 
 
@@ -983,9 +988,9 @@ def collect_history_for_existing_itad_games(
                 for key in ["list", "data", "history", "items", "rows"]
             ):
                 raise ValueError("이력 목록이 없는 오류 응답")
-            return gid, since_at, normalize_history_response(response), None
+            return gid, since_at, normalize_history_response(response), None, None
         except Exception as error:
-            return gid, since_at, [], collection_error_detail(error)
+            return gid, since_at, [], collection_error_detail(error), error
 
     result = {
         "history_rows_imported": 0,
@@ -996,7 +1001,7 @@ def collect_history_for_existing_itad_games(
         "errors": [],
     }
     with ThreadPoolExecutor(max_workers=4) as pool:
-        for gid, since_at, rows, error in pool.map(fetch, jobs):
+        for gid, since_at, rows, error, exception in pool.map(fetch, jobs):
             game = db.query(Game).filter(Game.id == gid).with_for_update().first()
             if game is None:
                 continue
@@ -1005,6 +1010,11 @@ def collect_history_for_existing_itad_games(
             game.history_attempted_at = utc_now()
             if error:
                 game.history_error = f"ITAD 이력 응답 확인 실패: {error}"
+                status = getattr(exception, "status_code", None)
+                delay = (86400 if status in {400, 404} else
+                         max(60, getattr(exception, "retry_after", 0)) if status in {401, 403, 429, 500, 502, 503, 504}
+                         else 1800)
+                game.history_retry_at = utc_now() + timedelta(seconds=delay)
                 result["error_count"] += 1
                 result["errors"].append(
                     {"title": game.title, "error": game.history_error}
@@ -1121,6 +1131,7 @@ def collect_history_for_existing_itad_games(
                     else since_at
                 )
                 game.history_error = None
+                game.history_retry_at = None
                 result["games_synced"] += 1
             db.flush()
     result["updated_count"] = result["history_rows_imported"]

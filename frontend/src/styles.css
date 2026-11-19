@@ -1381,6 +1381,8 @@
   border-radius: 999px;
   font-size: 12px;
   font-weight: 900;
+  white-space: nowrap;
+  word-break: normal;
 }
 
 .log-status.success {
@@ -1397,6 +1399,14 @@
   background: #dbeafe;
   color: #1e40af;
 }
+
+.log-status.waiting { background: #edf2f7; color: #47617a; }
+.log-status.blocked, .log-status.warning { background: #fff4da; color: #85620c; }
+.source-wait-notices { padding: 12px 16px; margin: 12px 0; border: 1px solid #e4d7b9; background: #fffaf0; border-radius: 8px; }
+.source-wait-notices p { margin: 3px 0 8px; }
+.admin-log-filters { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin: 14px 0; }
+.admin-log-filters select { width: auto; }
+.log-repeat { display: block; margin-top: 6px; color: #596975; }
 
 @media (max-width: 1000px) {
   .admin-summary-grid {
@@ -1867,6 +1877,7 @@
 
 .log-table {
   table-layout: fixed;
+  min-width: 1000px;
 }
 
 .log-table th,
@@ -1876,7 +1887,7 @@
 
 .log-table th:nth-child(1),
 .log-table td:nth-child(1) {
-  width: 90px;
+  width: 110px;
 }
 
 .log-table th:nth-child(2),

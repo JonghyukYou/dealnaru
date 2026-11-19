@@ -48,7 +48,9 @@ export default function RequestedGameCollector({ onCollected }) {
     </form>
     {error && <p className="inline-error" role="alert">{error}</p>}
     {warnings.length > 0 && <div className="subscription-notice">{warnings.map((note) => <p key={note}>{note}</p>)}</div>}
-    {searched && candidates.length === 0 && <p className="subscription-notice">일치하는 본편을 찾지 못했습니다. Steam 상점 링크나 앱 ID로 다시 검색해보세요.</p>}
+    {searched && candidates.length === 0 && <p className="subscription-notice">{warnings.length > 0
+      ? "검색 출처에 연결하지 못해 결과를 확인하지 못했습니다. 표시된 대기 시간이 지난 뒤 다시 검색해 주세요."
+      : "일치하는 본편을 찾지 못했습니다. Steam 상점 링크나 앱 ID로 다시 검색해보세요."}</p>}
     <div className="requested-game-results">{candidates.map((candidate) => {
       const key = String(candidate.steam_appid || candidate.itad_id);
       return <article className="requested-game-result" key={key}>

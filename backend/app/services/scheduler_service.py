@@ -12,9 +12,11 @@ from sqlalchemy import and_, or_
 from sqlalchemy.exc import IntegrityError
 
 from app.database import SessionLocal
+from app.services import itad_collect_service as itad_source
+from app.services import steam_collect_service as steam_source
 from app.models import AutoRefreshState, CrawlingLog, Game, Platform
 from app.services.catalog_filter_service import cleanup_invalid_catalog
-from app.services.crawling_log_service import prune_crawling_logs
+from app.services.crawling_log_service import prune_crawling_logs, finish_crawling_log
 from app.services.catalog_sync_service import (
     enrich_itad_catalog_metadata,
     link_catalog_to_itad,
@@ -29,7 +31,10 @@ from app.services.itad_collect_service import (
     import_itad_deals,
 )
 from app.services.price_freshness_service import deactivate_stale_current_prices
-from app.services.source_request_service import collection_error_detail, collection_result_error
+from app.services.source_request_service import (
+    collection_error_detail, collection_result_error, collection_error_status,
+    collection_result_status, error_http_status, source_statuses, SourceRequestError,
+)
 from app.services.steam_collect_service import (
     collect_existing_steam_prices,
     collect_steam_featured_games,
@@ -119,6 +124,7 @@ def get_scheduler_status(db):
         else "자동 갱신 켜짐"
         if state.enabled
         else "자동 갱신 꺼짐",
+        "source_states": source_statuses(db),
     }
 
 
@@ -229,13 +235,13 @@ def finish_refresh(token, result):
         state = db.get(AutoRefreshState, 1)
         if state is None or state.lease_token != token:
             return
-        failed = any(
-            step.get("status") == "FAIL" or step.get("error_count", 0)
-            for step in result["steps"]
-        )
+        failed = any(step.get("status") == "FAIL" for step in result["steps"])
+        attention = any(step.get("status") in {"PARTIAL", "WAITING", "BLOCKED", "WARNING"}
+                        or step.get("error_count", 0) for step in result["steps"])
         succeeded = any(step.get("updated_count", 0) for step in result["steps"])
         state.last_status = (
-            ("PARTIAL" if succeeded else "FAIL") if failed else "SUCCESS"
+            ("PARTIAL" if succeeded else "FAIL") if failed else
+            ("PARTIAL" if succeeded else "WAITING") if attention else "SUCCESS"
         )
         state.last_result = json.dumps(result, ensure_ascii=False, default=str)
         state.last_finished_at = utc_now()
@@ -273,13 +279,14 @@ def run_logged_collection(platform_name, label, callback):
             )
             error_count = int(result.get("error_count", 0))
             log = db.get(CrawlingLog, log_id)
-            log.status = ("PARTIAL" if rows else "FAIL") if error_count else "SUCCESS"
-            log.end_time = utc_now()
+            status = collection_result_status(result, rows)
             log.rows_count = rows
-            log.message = f"자동 갱신: {label} · 갱신 {rows}개 · 제외 {result.get('skipped_count', 0)}개 · 오류 {error_count}개"
-            reason = collection_result_error(result)
+            message = f"자동 갱신: {label} · 갱신 {rows}개 · 제외 {result.get('skipped_count', 0)}개 · 오류 {error_count}개"
+            reason = collection_result_error(result) or result.get("message")
             if reason:
-                log.message += f" · {reason}"
+                message += f" · {reason}"
+            log = finish_crawling_log(db, log, status, message,
+                group_key=f"auto:{error_http_status(reason)}" if status in {"WAITING", "BLOCKED", "WARNING"} else None)
             db.commit()
             return {
                 "source": label,
@@ -293,17 +300,18 @@ def run_logged_collection(platform_name, label, callback):
             }
         except Exception as error:
             db.rollback()
-            logger.exception("자동 갱신 출처 실패: %s", label)
+            status = collection_error_status(error)
+            if status == "FAIL":
+                logger.exception("자동 갱신 출처 실패: %s", label)
             log = db.get(CrawlingLog, log_id)
-            log.status = "FAIL"
-            log.end_time = utc_now()
             reason = collection_error_detail(error)
-            log.message = f"자동 갱신: {label} 실패 · {reason}"
+            log = finish_crawling_log(db, log, status, f"자동 갱신: {label} · {reason}",
+                group_key=f"auto:{error_http_status(error)}" if status in {"WAITING", "BLOCKED", "WARNING"} else None)
             db.commit()
             return {
                 "source": label,
-                "status": "FAIL",
-                "error_count": 1,
+                "status": status,
+                "error_count": 0 if getattr(error, "deferred", False) else 1,
                 "updated_count": 0,
                 "message": reason,
             }
@@ -322,11 +330,32 @@ def run_auto_collect_once():
             hours=20
         )
     result = {"steps": []}
+    paused_sources = {}
+    known_itad_ids = set()
 
     def step(platform, label, callback):
         heartbeat(token)
+        gate = (itad_source.request_gate if platform in {"IsThereAnyDeal", "GOG", "Fanatical"}
+                and label not in {"번들·비게임 정리", "기존 게임 이력 우선 수집 예약", "신규 게임 이력 수집 예약"}
+                else steam_source.request_gate if platform == "Steam" else None)
+        if gate:
+            try:
+                gate.ensure_available()
+            except SourceRequestError as error:
+                if gate.source in paused_sources:
+                    row = paused_sources[gate.source]
+                    row["deferred_steps"] = row.get("deferred_steps", 0) + 1
+                    return row
+                def deferred(_db):
+                    raise error
+                row = run_logged_collection(platform, f"{gate.source} 수집 대기", deferred)
+                paused_sources[gate.source] = row
+                result["steps"].append(row)
+                return row
         row = run_logged_collection(platform, label, callback)
         result["steps"].append(row)
+        if gate and gate.retry_after():
+            paused_sources[gate.source] = row
         return row
 
     try:
@@ -337,6 +366,14 @@ def run_auto_collect_once():
         )
         if os.getenv("ITAD_API_KEY"):
             step("IsThereAnyDeal", "기존 게임 이력 우선 수집 예약", queue_history_sync)
+            with SessionLocal() as db:
+                current_ids = [gid for (gid,) in db.query(Game.id).filter(Game.itad_id.isnot(None)).order_by(Game.id).all()]
+            known_itad_ids = set(current_ids)
+            # 신규 게임의 메타데이터보다 이미 등록한 게임의 현재 가격을 먼저 확인합니다.
+            for start in range(0, len(current_ids), 200):
+                ids = current_ids[start:start + 200]
+                step("IsThereAnyDeal", f"기존 구매처 현재가 {start + 1}~",
+                     lambda db, ids=ids: collect_current_prices_for_existing_itad_games(db, limit=200, game_ids=ids))
         if sync_catalog:
             steam = step(
                 "Steam",
@@ -350,7 +387,7 @@ def run_auto_collect_once():
                 "Epic 인기 본편",
                 lambda db: collect_epic_popular_games(db, max_items=new_count),
             )
-            if steam["status"] != "FAIL" and epic["status"] != "FAIL":
+            if steam["status"] == "SUCCESS" and epic["status"] == "SUCCESS":
                 with SessionLocal() as db:
                     db.query(AutoRefreshState).filter(
                         AutoRefreshState.id == 1, AutoRefreshState.lease_token == token
@@ -413,14 +450,15 @@ def run_auto_collect_once():
                     enrich_itad_catalog_metadata,
                 )
             with SessionLocal() as db:
-                itad_count = db.query(Game).filter(Game.itad_id.isnot(None)).count()
-            for offset in range(0, itad_count, 200):
+                new_ids = [gid for (gid,) in db.query(Game.id).filter(Game.itad_id.isnot(None)).order_by(Game.id).all()
+                           if gid not in known_itad_ids]
+            for offset in range(0, len(new_ids), 200):
                 step(
                     "IsThereAnyDeal",
-                    f"모든 구매처 현재가 {offset + 1}~",
-                    lambda db, offset=offset: (
+                    f"신규 구매처 현재가 {offset + 1}~",
+                    lambda db, ids=new_ids[offset:offset + 200]: (
                         collect_current_prices_for_existing_itad_games(
-                            db, limit=200, offset=offset
+                            db, limit=200, game_ids=ids
                         )
                     ),
                 )

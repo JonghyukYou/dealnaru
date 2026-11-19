@@ -18,7 +18,9 @@ from app.services.steam_collect_service import (
     HEADERS,
     fetch_steam_app_details,
     upsert_steam_game,
+    steam_request,
 )
+from app.services.source_request_service import collection_error_detail
 
 
 def steam_reference(query):
@@ -43,11 +45,9 @@ def steam_reference(query):
 
 
 def safe_source_error(source, error):
-    status = getattr(getattr(error, "response", None), "status_code", None)
     return {
         "source": source,
-        "message": f"{source} 연결 확인 실패: "
-        + (f"HTTP {status}" if status else type(error).__name__),
+        "message": f"{source} 연결 확인: {collection_error_detail(error)}",
     }
 
 
@@ -63,7 +63,7 @@ def steam_candidate(data):
 
 
 def search_steam_titles(query):
-    response = requests.get(
+    response = steam_request(
         "https://store.steampowered.com/api/storesearch/",
         params={"term": query, "cc": "kr", "l": "koreana"},
         headers=HEADERS,

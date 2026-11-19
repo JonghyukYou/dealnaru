@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.database import Base, SessionLocal, engine, get_db
 from app.models import (
+    AutoRefreshState,
     CrawlingLog,
     Game,
     GameTag,
@@ -98,6 +99,11 @@ from app.services.used_market_collect_service import (
 )
 from app.utils.time import to_kst_iso, to_utc_iso_z, utc_now
 from app.services.crawling_log_service import LOG_RETENTION_DAYS, prune_crawling_logs
+from app.services.source_request_service import (
+    SourceRequestError, collection_error_status, collection_result_status, collection_error_detail,
+)
+from app.services import steam_collect_service as steam_source
+from app.services import itad_collect_service as itad_source
 from app.settings import (
     ALLOWED_ORIGINS,
     EMAIL_VERIFICATION_REQUIRED,
@@ -113,6 +119,19 @@ logger = logging.getLogger(__name__)
 def development_only():
     if PRODUCTION:
         raise HTTPException(status_code=404, detail="페이지를 찾을 수 없습니다.")
+
+
+def require_source_available(gate):
+    try:
+        gate.ensure_available()
+    except SourceRequestError as error:
+        raise HTTPException(status_code=503, detail=str(error)) from error
+
+
+def require_bulk_collection_idle(db):
+    state = db.get(AutoRefreshState, 1)
+    if state and (state.run_requested or (state.lease_until and state.lease_until > utc_now())):
+        raise HTTPException(status_code=409, detail="전체 갱신이 진행 중이거나 대기 중입니다. 완료 후 수동 수집을 실행해 주세요.")
 
 
 @asynccontextmanager
@@ -184,13 +203,10 @@ async def handle_validation_error(_request: Request, error: RequestValidationErr
 
 
 def queue_price_enrichment(db):
+    """수동 수집 뒤에는 부족한 이력만 예약하고 전체 갱신을 연쇄 실행하지 않습니다."""
     if os.getenv("APP_ENV", "").lower() != "test":
-        try:
-            queue_history_sync(db, include_due=False)
-            db.commit()
-            request_refresh(db)
-        except ValueError:
-            pass  # 이미 실행 중인 전체 갱신에서 이어서 처리합니다.
+        queue_history_sync(db, include_due=False)
+        db.commit()
 
 
 @app.get("/api/admin/catalog/cleanup")
@@ -401,7 +417,7 @@ def format_notification(notification: Notification):
 def format_crawling_log(log: CrawlingLog):
     duration_seconds = None
 
-    if log.start_time and log.end_time:
+    if log.start_time and log.end_time and (log.repeat_count or 1) == 1:
         duration_seconds = round((log.end_time - log.start_time).total_seconds(), 2)
 
     platform_name = log.platform.name if log.platform else None
@@ -423,6 +439,9 @@ def format_crawling_log(log: CrawlingLog):
         "id": log.id,
         "platform": platform_name or "알 수 없음",
         "status": log.status,
+        "display_status": collection_error_status(log.message) if log.status == "FAIL" else log.status,
+        "repeat_count": log.repeat_count or 1,
+        "last_event_at": to_kst_iso(log.last_event_at),
         "start_time": to_kst_iso(log.start_time),
         "end_time": to_kst_iso(log.end_time),
         "duration_seconds": duration_seconds,
@@ -1805,7 +1824,7 @@ def find_requested_game(
     try:
         return search_requested_games(db, payload.query)
     except ValueError as error:
-        raise HTTPException(status_code=400, detail=str(error)) from error
+        raise HTTPException(status_code=503 if isinstance(error, SourceRequestError) else 400, detail=str(error)) from error
     except Exception as error:
         raise HTTPException(
             status_code=502,
@@ -1942,6 +1961,8 @@ def collect_official_subscription_offers(
 def list_crawling_logs(
     page: int = Query(1),
     page_size: int = Query(10),
+    view: str = Query("all", pattern="^(all|summary)$"),
+    filter: str = Query("all", pattern="^(all|issues)$"),
     current_user: User = Depends(get_current_admin_user),
     db: Session = Depends(get_db),
 ):
@@ -1956,16 +1977,25 @@ def list_crawling_logs(
 
     if prune_crawling_logs(db):
         db.commit()
-    total = db.query(CrawlingLog).count()
+    query = db.query(CrawlingLog)
+    if view == "summary":
+        query = query.filter(or_(
+            CrawlingLog.message.is_(None),
+            ~CrawlingLog.message.startswith("가격 이력 우선 보강"),
+            CrawlingLog.group_key.isnot(None),
+        ))
+    if filter == "issues":
+        query = query.filter(CrawlingLog.status.notin_(["SUCCESS", "RUNNING"]))
+    total = query.count()
     total_pages = max(1, (total + page_size - 1) // page_size)
 
     if page > total_pages:
         page = total_pages
 
     logs = (
-        db.query(CrawlingLog)
+        query
         .options(joinedload(CrawlingLog.platform))
-        .order_by(CrawlingLog.start_time.desc(), CrawlingLog.id.desc())
+        .order_by(func.coalesce(CrawlingLog.last_event_at, CrawlingLog.start_time).desc(), CrawlingLog.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
         .all()
@@ -1978,6 +2008,8 @@ def list_crawling_logs(
         "page_size": page_size,
         "total_pages": total_pages,
         "retention_days": LOG_RETENTION_DAYS,
+        "view": view,
+        "filter": filter,
     }
 
 
@@ -2042,13 +2074,13 @@ def collect_price_manually(
         fail_log = db.query(CrawlingLog).filter(CrawlingLog.id == log.id).first()
 
         if fail_log:
-            fail_log.status = "FAIL"
+            fail_log.status = collection_error_status(error)
             fail_log.end_time = utc_now()
             fail_log.rows_count = 0
             fail_log.message = str(error)
             db.commit()
 
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(status_code=503 if isinstance(error, SourceRequestError) else 400, detail=str(error))
 
 
 @app.post("/api/admin/steam/import-featured")
@@ -2067,6 +2099,8 @@ def import_steam_featured_games(
             status_code=400, detail="한 번에 최대 100개까지만 수집할 수 있습니다."
         )
 
+    require_source_available(steam_source.request_gate)
+    require_bulk_collection_idle(db)
     steam_platform = db.query(Platform).filter(Platform.name == "Steam").first()
 
     log = CrawlingLog(
@@ -2089,7 +2123,7 @@ def import_steam_featured_games(
             language=payload.language,
         )
 
-        log.status = "SUCCESS"
+        log.status = collection_result_status(result, result["imported_count"])
         log.end_time = utc_now()
         log.rows_count = result["imported_count"]
         log.message = (
@@ -2112,13 +2146,13 @@ def import_steam_featured_games(
         fail_log = db.query(CrawlingLog).filter(CrawlingLog.id == log.id).first()
 
         if fail_log:
-            fail_log.status = "FAIL"
+            fail_log.status = collection_error_status(error)
             fail_log.end_time = utc_now()
             fail_log.rows_count = 0
             fail_log.message = str(error)
             db.commit()
 
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(status_code=503 if isinstance(error, SourceRequestError) else 400, detail=str(error))
 
 
 @app.post("/api/admin/steam/collect-existing")
@@ -2137,6 +2171,8 @@ def collect_existing_steam_games(
             status_code=400, detail="한 번에 최대 200개까지만 갱신할 수 있습니다."
         )
 
+    require_source_available(steam_source.request_gate)
+    require_bulk_collection_idle(db)
     steam_platform = db.query(Platform).filter(Platform.name == "Steam").first()
 
     log = CrawlingLog(
@@ -2159,7 +2195,7 @@ def collect_existing_steam_games(
             language=payload.language,
         )
 
-        log.status = "SUCCESS"
+        log.status = collection_result_status(result, result["updated_count"])
         log.end_time = utc_now()
         log.rows_count = result["updated_count"]
         log.message = (
@@ -2181,13 +2217,13 @@ def collect_existing_steam_games(
         fail_log = db.query(CrawlingLog).filter(CrawlingLog.id == log.id).first()
 
         if fail_log:
-            fail_log.status = "FAIL"
+            fail_log.status = collection_error_status(error)
             fail_log.end_time = utc_now()
             fail_log.rows_count = 0
             fail_log.message = str(error)
             db.commit()
 
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(status_code=503 if isinstance(error, SourceRequestError) else 400, detail=str(error))
 
 
 @app.post("/api/admin/itad/import-deals")
@@ -2201,6 +2237,8 @@ def import_itad_deals_api(
             status_code=400, detail="수집 개수는 1~200 사이여야 합니다."
         )
 
+    require_source_available(itad_source.request_gate)
+    require_bulk_collection_idle(db)
     shop_names = {
         61: "Steam",
         16: "Epic Game Store",
@@ -2276,13 +2314,13 @@ def import_itad_deals_api(
         fail_log = db.query(CrawlingLog).filter(CrawlingLog.id == log.id).first()
 
         if fail_log:
-            fail_log.status = "FAIL"
+            fail_log.status = collection_error_status(error)
             fail_log.end_time = utc_now()
             fail_log.rows_count = 0
             fail_log.message = str(error)
             db.commit()
 
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(status_code=503 if isinstance(error, SourceRequestError) else 400, detail=str(error))
 
 
 @app.post("/api/admin/itad/collect-current")
@@ -2338,13 +2376,13 @@ def collect_itad_current_prices_api(
         fail_log = db.query(CrawlingLog).filter(CrawlingLog.id == log.id).first()
 
         if fail_log:
-            fail_log.status = "FAIL"
+            fail_log.status = collection_error_status(error)
             fail_log.end_time = utc_now()
             fail_log.rows_count = 0
             fail_log.message = str(error)
             db.commit()
 
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(status_code=503 if isinstance(error, SourceRequestError) else 400, detail=str(error))
 
 
 @app.post("/api/admin/itad/collect-history")
@@ -2358,6 +2396,8 @@ def collect_itad_history_api(
             status_code=400, detail="히스토리 수집 게임 수는 1~100 사이여야 합니다."
         )
 
+    require_source_available(itad_source.request_gate)
+    require_bulk_collection_idle(db)
     platform = get_or_create_log_platform(db, "IsThereAnyDeal")
     log = CrawlingLog(
         platform_id=platform.id,
@@ -2422,13 +2462,13 @@ def collect_itad_history_api(
         fail_log = db.query(CrawlingLog).filter(CrawlingLog.id == log.id).first()
 
         if fail_log:
-            fail_log.status = "FAIL"
+            fail_log.status = collection_error_status(error)
             fail_log.end_time = utc_now()
             fail_log.rows_count = 0
             fail_log.message = str(error)
             db.commit()
 
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(status_code=503 if isinstance(error, SourceRequestError) else 400, detail=str(error))
 
 
 @app.delete("/api/admin/dev/remove-sample-games", dependencies=[Depends(development_only)])
@@ -2524,13 +2564,13 @@ def import_itad_popular_games_api(
         fail_log = db.query(CrawlingLog).filter(CrawlingLog.id == log.id).first()
 
         if fail_log:
-            fail_log.status = "FAIL"
+            fail_log.status = collection_error_status(error)
             fail_log.end_time = utc_now()
             fail_log.rows_count = 0
             fail_log.message = str(error)
             db.commit()
 
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(status_code=503 if isinstance(error, SourceRequestError) else 400, detail=str(error))
 
 
 @app.post("/api/admin/used-market/collect")
@@ -2599,13 +2639,13 @@ def admin_collect_used_market(
         fail_log = db.query(CrawlingLog).filter(CrawlingLog.id == log.id).first()
 
         if fail_log:
-            fail_log.status = "FAIL"
+            fail_log.status = collection_error_status(error)
             fail_log.end_time = utc_now()
             fail_log.rows_count = 0
             fail_log.message = str(error)
             db.commit()
 
-        raise HTTPException(status_code=400, detail=str(error))
+        raise HTTPException(status_code=503 if isinstance(error, SourceRequestError) else 400, detail=str(error))
 
 
 @app.delete("/api/admin/dev/reset-collected-data", dependencies=[Depends(development_only)])

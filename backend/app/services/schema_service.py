@@ -21,6 +21,7 @@ ADDITIONS = {
         "history_attempted_at": "TIMESTAMP",
         "history_start_at": "TIMESTAMP",
         "history_error": "TEXT",
+        "history_retry_at": "TIMESTAMP",
         "history_queued_at": "TIMESTAMP",
         "history_priority": "INTEGER NOT NULL DEFAULT 0",
         "history_lease_token": "VARCHAR(80)",
@@ -31,6 +32,11 @@ ADDITIONS = {
         "is_available": "BOOLEAN NOT NULL DEFAULT TRUE",
     },
     "auto_refresh_state": {"catalog_synced_at": "TIMESTAMP"},
+    "crawling_logs": {
+        "group_key": "VARCHAR(120)",
+        "repeat_count": "INTEGER NOT NULL DEFAULT 1",
+        "last_event_at": "TIMESTAMP",
+    },
     "software": {
         "source_key": "VARCHAR(80)",
         "kind": "VARCHAR(20) NOT NULL DEFAULT 'software'",

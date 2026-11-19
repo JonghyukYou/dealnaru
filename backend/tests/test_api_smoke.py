@@ -46,7 +46,10 @@ from app.utils.time import utc_now
 
 
 @pytest.fixture(autouse=True)
-def reset_database():
+def reset_database(monkeypatch):
+    from app.services.source_request_service import SourceRequestGate
+    monkeypatch.setattr(itad_collect_service, "request_gate", SourceRequestGate("ITAD", 0))
+    monkeypatch.setattr(steam_collect_service, "request_gate", SourceRequestGate("Steam", 0))
     Base.metadata.drop_all(bind=engine)
     Base.metadata.create_all(bind=engine)
 

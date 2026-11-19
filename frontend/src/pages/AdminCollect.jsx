@@ -5,6 +5,7 @@ import RequestedGameCollector from "../components/RequestedGameCollector";
 import LogPagination from "../components/LogPagination";
 
 const COLLECTION_TIMEOUT_MS = 180000;
+const LOG_LABELS = { SUCCESS: "완료", FAIL: "실패", PARTIAL: "일부 완료", RUNNING: "진행 중", WAITING: "요청 대기", BLOCKED: "접근 제한", WARNING: "요청 확인", SKIPPED: "건너뜀" };
 
 function collectionResultMessage(data) {
   const result = data.result || {};
@@ -58,6 +59,8 @@ function AdminCollect() {
 
   const [logPage, setLogPage] = useState(1);
   const [logPageSize, setLogPageSize] = useState(10);
+  const [logView, setLogView] = useState("summary");
+  const [logFilter, setLogFilter] = useState("all");
   const [logTotalPages, setLogTotalPages] = useState(1);
   const [logTotal, setLogTotal] = useState(0);
   const latestRequest = useRef(0);
@@ -72,7 +75,7 @@ function AdminCollect() {
       try {
         const [logsResult, gamesResult, scheduleResult] = await Promise.allSettled([
           api.get("/api/admin/crawling-logs", {
-            params: { page, page_size: logPageSize },
+            params: { page, page_size: logPageSize, view: logView, filter: logFilter },
           }),
           publicDeployment ? Promise.resolve({ data: [] }) : api.get("/api/admin/game-options"),
           api.get("/api/admin/auto-refresh"),
@@ -130,7 +133,7 @@ function AdminCollect() {
         if (requestId === latestRequest.current) setIsLoading(false);
       }
     },
-    [logPage, logPageSize]
+    [logPage, logPageSize, logView, logFilter]
   );
 
   const refreshAfterAction = async () => {
@@ -329,6 +332,13 @@ function AdminCollect() {
         <div className="section-title-row"><div><h2>자동 갱신</h2><p className="admin-help-text">서버가 켜져 있는 동안 실행됩니다. 설정은 서버 재시작 후에도 유지됩니다.</p></div>
           <span className={`offer-status ${schedule?.is_collecting ? "information" : schedule?.enabled ? "active" : "reference"}`}>{schedule?.message || "상태 확인 중"}</span></div>
         {scheduleError && <p role="alert" className="subscription-notice">{scheduleError}</p>}
+        {schedule?.source_states?.length > 0 && <div className="source-wait-notices" role="status">
+          {schedule.source_states.map((source) => <p key={source.source}>
+            <strong>{source.source}: {LOG_LABELS[source.status] || source.status}</strong>
+            {source.http_status && ` · HTTP ${source.http_status}`} · 재확인 {formatKoreanDateTime(source.retry_at)}
+          </p>)}
+          <small>원본의 요청 제한 동안 기존 가격을 유지하며, 다른 출처는 계속 갱신합니다.</small>
+        </div>}
         {scheduleForm && <form className="auto-refresh-form" onSubmit={handleSaveSchedule}>
           <label className="subscription-check"><input type="checkbox" checked={scheduleForm.enabled} onChange={(event) => setScheduleForm({ ...scheduleForm, enabled: event.target.checked })} /> 자동 갱신 켜기</label>
           <label>주기 (분)<input type="number" min="30" max="10080" step="1" value={scheduleForm.interval_minutes} onChange={(event) => setScheduleForm({ ...scheduleForm, interval_minutes: event.target.value })} /></label>
@@ -337,10 +347,10 @@ function AdminCollect() {
           <button disabled={isSavingSchedule}>{isSavingSchedule ? "저장 중..." : "설정 저장"}</button>
           <button type="button" className="secondary-button" disabled={schedule?.is_collecting || schedule?.run_requested || !schedule?.worker_active} onClick={handleRunNow}>지금 갱신</button>
         </form>}
-        <div className="auto-refresh-times"><p>다음 갱신 <strong>{formatKoreanDateTime(schedule?.next_run_at)}</strong></p><p>최근 완료 <strong>{formatKoreanDateTime(schedule?.last_finished_at)}</strong></p><p>최근 결과 <strong>{schedule?.last_status || "-"}</strong></p></div>
+        <div className="auto-refresh-times"><p>다음 갱신 <strong>{formatKoreanDateTime(schedule?.next_run_at)}</strong></p><p>최근 완료 <strong>{formatKoreanDateTime(schedule?.last_finished_at)}</strong></p><p>최근 결과 <strong>{LOG_LABELS[schedule?.last_status] || schedule?.last_status || "-"}</strong></p></div>
         <div className="auto-refresh-times"><p>전체 게임 <strong>{schedule?.catalog_game_count || 0}개</strong></p><p>ITAD 연결 <strong>{schedule?.itad_linked_count || 0}개</strong></p><p>최초 이력 대기 <strong>{schedule?.history_pending_count || 0}개</strong></p><p>이력 재확인 <strong>{schedule?.history_failed_count || 0}개</strong></p></div>
         <div className="auto-refresh-times"><p>이력 수집 대기 <strong>{schedule?.history_queued_count || 0}개</strong></p><p>이력 수집 중 <strong>{schedule?.history_running_count || 0}개</strong></p></div>
-        {schedule?.last_result?.steps && <div className="auto-refresh-results">{schedule.last_result.steps.map((step, index) => <span key={`${step.source}-${index}`} className={`offer-status ${step.status === "FAIL" || step.status === "PARTIAL" ? "needs_check" : "reference"}`}>{step.source}: {step.status}{step.updated_count !== undefined && ` · ${step.updated_count}개`}{step.message && ` · ${step.message}`}</span>)}</div>}
+        {schedule?.last_result?.steps && <div className="auto-refresh-results">{schedule.last_result.steps.map((step, index) => <span key={`${step.source}-${index}`} className={`offer-status ${step.status === "SUCCESS" ? "active" : "needs_check"}`}>{step.source}: {LOG_LABELS[step.status] || step.status}{step.updated_count !== undefined && ` · ${step.updated_count}개`}{step.deferred_steps > 0 && ` · 나머지 ${step.deferred_steps}단계 대기`}{step.message && ` · ${step.message}`}</span>)}</div>}
       </section>
 
       <section className="panel collection-console">
@@ -376,7 +386,7 @@ function AdminCollect() {
               onChange={(event) => setSteamImportCount(event.target.value)}
             />
           </label>
-          <button onClick={handleImportSteam} disabled={isSteamImporting}>
+          <button onClick={handleImportSteam} disabled={isSteamImporting || schedule?.is_collecting || schedule?.run_requested || schedule?.source_states?.some((source) => source.source === "Steam")}>
             {isSteamImporting ? "Steam 수집 중..." : "Steam 수집"}
           </button>
         </div>
@@ -411,7 +421,7 @@ function AdminCollect() {
               onChange={(event) => setStoreImportCount(event.target.value)}
             />
           </label>
-          <button onClick={handleImportStoreDeals} disabled={isStoreImporting}>
+          <button onClick={handleImportStoreDeals} disabled={isStoreImporting || schedule?.is_collecting || schedule?.run_requested || schedule?.source_states?.some((source) => source.source === "ITAD")}>
             {isStoreImporting ? "구매처 수집 중..." : "선택 구매처 수집"}
           </button>
         </div>
@@ -516,6 +526,12 @@ function AdminCollect() {
 
         <article className="panel">
           <h2>수집 로그</h2>
+          <div className="admin-log-filters">
+            <label htmlFor="log-view">로그 보기</label>
+            <select id="log-view" value={logView} onChange={(event) => { setLogPage(1); setLogView(event.target.value); }}><option value="summary">실행 요약</option><option value="all">전체 상세 로그</option></select>
+            <label htmlFor="log-filter">상태</label>
+            <select id="log-filter" value={logFilter} onChange={(event) => { setLogPage(1); setLogFilter(event.target.value); }}><option value="all">모든 상태</option><option value="issues">확인 필요한 작업</option></select>
+          </div>
           <div className="admin-log-toolbar">
             <p className="notice-text">최근 3일 로그 {logTotal}개 · {logPage} / {logTotalPages} 페이지<br />진행 중인 작업을 제외한 72시간 이전 로그는 자동 삭제됩니다.</p>
             <div className="log-size-control"><label htmlFor="admin-log-page-size">표시 개수</label><select id="admin-log-page-size" value={logPageSize} onChange={(event) => { setLogPage(1); setLogPageSize(Number(event.target.value)); }}>
@@ -535,15 +551,15 @@ function AdminCollect() {
                     <th>건수</th>
                     <th>시간</th>
                     <th>메시지</th>
-                    <th>시작</th>
+                    <th>시각</th>
                   </tr>
                 </thead>
                 <tbody>
                   {logs.map((log) => (
                     <tr key={log.id}>
                       <td>
-                        <span className={`log-status ${log.status.toLowerCase()}`}>
-                          {log.status}
+                        <span className={`log-status ${(log.display_status || log.status).toLowerCase()}`} title={`기록 상태: ${log.status}`}>
+                          {LOG_LABELS[log.display_status || log.status] || log.status}
                         </span>
                       </td>
                       <td>{log.platform}</td>
@@ -553,8 +569,8 @@ function AdminCollect() {
                           ? `${log.duration_seconds}초`
                           : "-"}
                       </td>
-                      <td>{log.message}</td>
-                      <td>{formatKoreanDateTime(log.start_time)}</td>
+                      <td>{log.message}{log.repeat_count > 1 && <small className="log-repeat">같은 유형 {log.repeat_count}건을 묶었습니다.</small>}</td>
+                      <td>{formatKoreanDateTime(log.last_event_at || log.start_time)}</td>
                     </tr>
                   ))}
                 </tbody>

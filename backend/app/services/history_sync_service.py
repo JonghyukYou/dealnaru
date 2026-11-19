@@ -6,6 +6,7 @@
 
 import logging
 import os
+import time
 from datetime import datetime, timedelta
 from threading import Event, Thread
 from uuid import uuid4
@@ -13,10 +14,13 @@ from uuid import uuid4
 from sqlalchemy import or_
 
 from app.database import SessionLocal
-from app.models import CrawlingLog, Game, Platform, PriceSnapshot
+from app.models import AutoRefreshState, CrawlingLog, Game, Platform, PriceSnapshot
 from app.services import itad_collect_service as itad
 from app.services.catalog_sync_service import link_catalog_to_itad
-from app.services.source_request_service import collection_error_detail
+from app.services.crawling_log_service import finish_crawling_log
+from app.services.source_request_service import (
+    collection_error_detail, collection_error_status, collection_result_status, error_http_status,
+)
 from app.utils.time import utc_now
 
 logger = logging.getLogger(__name__)
@@ -56,8 +60,11 @@ def queue_history_sync(
         query = query.filter(
             eligible,
             or_(
-                Game.history_attempted_at.is_(None),
-                Game.history_attempted_at < now - timedelta(minutes=30),
+                Game.history_retry_at <= now,
+                (Game.history_retry_at.is_(None)) & or_(
+                    Game.history_attempted_at.is_(None),
+                    Game.history_attempted_at < now - timedelta(minutes=30),
+                ),
             ),
         )
     queued = 0
@@ -66,6 +73,7 @@ def queue_history_sync(
             continue
         if force_full:
             game.history_start_at = None
+            game.history_retry_at = None
         if game.history_queued_at is None:
             game.history_queued_at = now
             queued += 1
@@ -104,7 +112,7 @@ def claim_next_history_job(db):
     candidates = (
         db.query(Game.id)
         .filter(Game.history_queued_at.isnot(None), free)
-        .order_by(Game.history_priority.desc(), Game.history_queued_at, Game.id)
+        .order_by(Game.history_priority.desc(), Game.review_count.desc().nullslast(), Game.history_queued_at, Game.id)
         .limit(20)
         .all()
     )
@@ -131,6 +139,9 @@ def run_next_history_job():
     if not has_history_key() or itad.request_gate.retry_after():
         return None
     with SessionLocal() as db:
+        refresh = db.get(AutoRefreshState, 1)
+        if refresh and refresh.lease_until and refresh.lease_until > utc_now():
+            return None  # 현재 가격 갱신을 우선하고 이력은 이후에 나눠 처리합니다.
         job = claim_next_history_job(db)
         if not job:
             return None
@@ -187,15 +198,12 @@ def run_next_history_job():
                     )
             log = db.get(CrawlingLog, log_id)
             log.rows_count = result.get("history_rows_imported", 0)
-            log.status = (
-                ("PARTIAL" if log.rows_count else "FAIL")
-                if result.get("error_count")
-                else "SUCCESS"
-            )
-            log.end_time = utc_now()
-            log.message = f"가격 이력 우선 보강: {title} · 실제 변경 이력 {log.rows_count}건 · 오류 {result.get('error_count', 0)}개"
+            status = collection_result_status(result, log.rows_count)
+            message = f"가격 이력 우선 보강: {title} · 실제 변경 이력 {log.rows_count}건 · 오류 {result.get('error_count', 0)}개"
             if result.get("error_count") and game is not None and game.history_error:
-                log.message += f" · {game.history_error}"
+                message += f" · {game.history_error}"
+            log = finish_crawling_log(db, log, status, message,
+                group_key=f"history:{error_http_status(message)}" if status in {"WAITING", "BLOCKED", "WARNING"} else None)
             db.commit()
         except Exception as error:
             db.rollback()
@@ -203,13 +211,16 @@ def run_next_history_job():
             if game and game.history_lease_token == token:
                 game.history_attempted_at = utc_now()
                 game.history_error = f"가격 이력 보강 실패: {collection_error_detail(error)}"
+                delay = 86400 if error_http_status(error) in {400, 404} else max(1800, getattr(error, "retry_after", 0))
+                game.history_retry_at = utc_now() + timedelta(seconds=delay)
             log = db.get(CrawlingLog, log_id)
             if log:
-                log.status = "FAIL"
-                log.end_time = utc_now()
-                log.message = (
+                message = (
                     f"가격 이력 우선 보강 실패: {title} · {collection_error_detail(error)}"
                 )
+                status = collection_error_status(error)
+                log = finish_crawling_log(db, log, status, message,
+                    group_key=f"history:{error_http_status(error)}" if status in {"WAITING", "BLOCKED", "WARNING"} else None)
             db.commit()
             result = {"history_rows_imported": 0, "error_count": 1}
             logger.exception("가격 이력 우선 보강 실패: game_id=%s", gid)
@@ -234,18 +245,29 @@ def history_worker_active():
 
 
 def _loop():
+    window_started, processed, next_queue = time.monotonic(), 0, 0.0
     while not _stop.is_set():
         try:
+            now = time.monotonic()
+            if now - window_started >= 300:
+                window_started, processed = now, 0
+            if processed >= 20:
+                _wake.wait(min(30, max(1, 300 - (now - window_started))))
+                _wake.clear()
+                continue
             retry_after = itad.request_gate.retry_after()
             if retry_after:
                 # 제한 중에는 다음 게임을 꺼내지 않아 동일 오류가 수백 줄 쌓이지 않습니다.
                 _wake.wait(min(30, retry_after))
                 _wake.clear()
                 continue
-            with SessionLocal() as db:
-                queue_history_sync(db, include_due=False)
-                db.commit()
+            if now >= next_queue:
+                with SessionLocal() as db:
+                    queue_history_sync(db, include_due=False)
+                    db.commit()
+                next_queue = now + 60
             if run_next_history_job():
+                processed += 1
                 continue
         except Exception:
             logger.exception("가격 이력 대기열 확인 실패; 다음 확인에서 재시도")

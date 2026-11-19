@@ -153,7 +153,7 @@ def test_history_and_auto_refresh_logs_include_actual_http_errors(monkeypatch):
         log = db.query(CrawlingLog).one()
         assert "HTTP 429" in log.message and "120" in log.message
     result = scheduler.run_logged_collection("IsThereAnyDeal", "test", limited)
-    assert result["status"] == "FAIL" and "HTTP 429" in result["message"]
+    assert result["status"] == "WAITING" and "HTTP 429" in result["message"]
 
 
 def test_source_errors_exclude_private_urls_and_request_headers():

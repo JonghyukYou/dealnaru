@@ -47,6 +47,7 @@ class Game(Base):
     history_attempted_at = Column(DateTime, nullable=True)
     history_start_at = Column(DateTime, nullable=True)
     history_error = Column(Text, nullable=True)
+    history_retry_at = Column(DateTime, nullable=True)
     history_queued_at = Column(DateTime, nullable=True)
     history_priority = Column(Integer, nullable=False, default=0)
     history_lease_token = Column(String(80), nullable=True)
@@ -349,8 +350,24 @@ class CrawlingLog(Base):
     end_time = Column(DateTime, nullable=True)
     rows_count = Column(Integer, default=0)
     message = Column(Text, nullable=True)
+    group_key = Column(String(120), nullable=True)
+    repeat_count = Column(Integer, nullable=False, default=1)
+    last_event_at = Column(DateTime, nullable=True)
 
     platform = relationship("Platform", back_populates="logs")
+
+
+class CollectionSourceState(Base):
+    """원본의 대기 시간을 DB에 보관해 서버 재시작으로 제한을 무시하지 않습니다."""
+
+    __tablename__ = "collection_source_states"
+
+    source = Column(String(80), primary_key=True)
+    paused_until = Column(DateTime, nullable=True)
+    http_status = Column(Integer, nullable=True)
+    detail = Column(Text, nullable=True)
+    min_interval = Column(Numeric(10, 2), nullable=True)
+    updated_at = Column(DateTime, nullable=False, default=utc_now)
 
 
 class AutoRefreshState(Base):

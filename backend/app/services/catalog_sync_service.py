@@ -153,11 +153,11 @@ def link_catalog_to_itad(db, limit=80, game_ids=None):
             game = db.get(Game, gid)
             if game is None:
                 continue
-            game.itad_lookup_checked_at = utc_now()
             if error:
                 result["error_count"] += 1
                 result["errors"].append({"title": game.title, "error": error})
                 continue
+            game.itad_lookup_checked_at = utc_now()
             if not info:
                 result["skipped_count"] += 1
                 continue
@@ -224,12 +224,12 @@ def enrich_itad_catalog_metadata(db, limit=80):
             game = db.get(Game, gid)
             if not game:
                 continue
-            game.itad_lookup_checked_at = utc_now()
             if error or not info or not info.get("id"):
                 result["error_count"] += 1
                 if len(result["errors"]) < 10:
                     result["errors"].append({"title": game.title, "error": error or "ITAD 게임 정보 없음"})
                 continue
+            game.itad_lookup_checked_at = utc_now()
             if (
                 info.get("type") != "game"
                 or non_game_reason(
