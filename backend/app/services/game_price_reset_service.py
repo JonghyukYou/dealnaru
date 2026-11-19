@@ -1,6 +1,7 @@
 """게임과 사용자 연결은 보존하고, 디지털 게임 가격과 파생 캐시만 초기화합니다."""
 
-from app.models import Game, PredictionResult, PriceSnapshot, UsedMarketSummary
+from app.models import Game, GamePriceTest, PredictionResult, PriceSnapshot, UsedMarketSummary
+from app.utils.time import utc_now
 
 
 def reset_game_prices(db, apply=False):
@@ -14,6 +15,9 @@ def reset_game_prices(db, apply=False):
         return result
     # 동일 게임의 진행 중 쓰기가 끝난 뒤 초기화합니다. CLI 실행 시 서버도 중지해야 합니다.
     db.query(Game.id).order_by(Game.id).with_for_update().all()
+    db.query(GamePriceTest).filter(GamePriceTest.active.is_(True)).update(
+        {GamePriceTest.active: False, GamePriceTest.ended_at: utc_now()}, synchronize_session=False,
+    )
     db.query(PredictionResult).delete(synchronize_session=False)
     db.query(PriceSnapshot).delete(synchronize_session=False)
     db.query(Game).update(

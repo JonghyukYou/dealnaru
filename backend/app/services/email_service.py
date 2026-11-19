@@ -91,6 +91,7 @@ def send_target_price_email(
     discounted_price: int,
     target_price: int,
     game_url: str | None = None,
+    is_test: bool = False,
 ):
     safe_nickname = escape(nickname)
     safe_game_title = escape(game_title)
@@ -110,8 +111,8 @@ def send_target_price_email(
 
     html = f"""
     <div style="font-family: Arial, sans-serif; line-height: 1.6;">
-      <h2>위시리스트 목표가 도달!</h2>
-      <p>{safe_nickname}님, 기다리던 게임이 목표가 이하로 내려갔습니다.</p>
+      <h2>{'(테스트용) ' if is_test else ''}위시리스트 목표가 도달!</h2>
+      <p>{safe_nickname}님, {'관리자가 설정한 테스트 가격이 목표가 이하입니다. 실제 할인이나 판매 가격이 아닙니다.' if is_test else '기다리던 게임이 목표가 이하로 내려갔습니다.'}</p>
       <ul>
         <li><strong>게임:</strong> {safe_game_title}</li>
         <li><strong>플랫폼:</strong> {safe_platform_name}</li>
@@ -125,6 +126,6 @@ def send_target_price_email(
 
     return send_email(
         to=to,
-        subject=f"[딜나루] {game_title} 목표가 도달!",
+        subject=f"[딜나루]{' (테스트용)' if is_test else ''} {game_title} 목표가 도달!",
         html=html,
     )

@@ -14,6 +14,7 @@ from bs4 import BeautifulSoup
 from sqlalchemy import or_
 
 from app.models import UsedMarketItem
+from app.services.used_market_moderation_service import ExcludedMarketItem, is_excluded
 from app.utils.time import utc_now
 
 BASE_SEARCH_URL = "https://web.joongna.com/search/{keyword}"
@@ -332,6 +333,8 @@ def parse_market_page(html, source, keyword, limit):
 
 
 def upsert_used_market_item(db, parsed_item):
+    if is_excluded(db, keyword=parsed_item.get("keyword"), item_url=parsed_item.get("item_url")):
+        raise ExcludedMarketItem("관리자가 삭제한 키워드 또는 매물입니다.")
     title = normalize_listing_title(parsed_item.get("title"), parsed_item.get("price"))
     if not title:
         raise ValueError("가격만 있는 텍스트는 상품명으로 저장할 수 없습니다.")
@@ -364,14 +367,21 @@ def collect_used_market_items(db, keywords=None, limit_per_keyword=5):
     for source in ("joongna",):
         summary = {"source": PROVIDERS[source]["name"], "status": "success", "collected_count": 0, "message": ""}
         for keyword in keywords:
+            if is_excluded(db, keyword=keyword):
+                result["skipped"].append({"source": summary["source"], "keyword": keyword, "reason": "관리자가 재수집에서 제외한 키워드"})
+                continue
             try:
                 html = fetch_public_page(build_search_url(source, keyword), source)
                 parsed = parse_market_page(html, source, keyword, limit)
                 if not parsed:
                     result["skipped"].append({"source": summary["source"], "keyword": keyword, "reason": "검색 결과 없음 또는 공개 매물 구조 확인 불가"})
                 for parsed_item in parsed:
-                    with db.begin_nested():
-                        item, created = upsert_used_market_item(db, parsed_item)
+                    try:
+                        with db.begin_nested():
+                            item, created = upsert_used_market_item(db, parsed_item)
+                    except ExcludedMarketItem:
+                        result["skipped"].append({"source": summary["source"], "keyword": keyword, "reason": "관리자가 삭제한 매물"})
+                        continue
                     result["imported" if created else "updated"].append({"id": item.id, "source": item.source, "title": item.title, "price": item.price})
                     summary["collected_count"] += 1
             except CollectionUnavailable as error:

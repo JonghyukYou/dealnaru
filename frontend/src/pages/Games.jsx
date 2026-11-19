@@ -321,6 +321,7 @@ function Games() {
 
                   <div className="price-row">
                     <strong>{formatGameMoney(game.discounted_price, game.currency)}</strong>
+                    {game.is_test_price && <span className="test-price-badge">테스트용</span>}
                     {game.discount_rate > 0 && <del>{formatGameMoney(game.original_price, game.currency)}</del>}
                     {game.discount_rate > 0 ? <span className="discount-badge">-{game.discount_rate}%</span> : <span className="catalog-status">{game.price_status}</span>}
                   </div>

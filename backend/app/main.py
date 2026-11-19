@@ -20,6 +20,7 @@ from app.models import (
     AutoRefreshState,
     CrawlingLog,
     Game,
+    GamePriceTest,
     GameTag,
     Notification,
     Platform,
@@ -28,6 +29,7 @@ from app.models import (
     Software,
     SoftwarePromotion,
     UsedMarketItem,
+    UsedMarketExclusion,
     UsedMarketSummary,
     User,
     WishlistItem,
@@ -46,6 +48,12 @@ from app.services.auth_service import (
 )
 from app.services.catalog_filter_service import cleanup_invalid_catalog
 from app.services.collection_service import update_game_price_and_notify
+from app.services.price_test_service import (
+    active_price_tests, create_price_test, effective_prices, list_price_tests, stop_price_test,
+)
+from app.services.used_market_moderation_service import (
+    delete_item as delete_market_item, delete_keyword as delete_market_keyword, visible_market_clause,
+)
 from app.services.email_service import send_verification_email
 from app.services.history_sync_service import (
     history_status,
@@ -353,6 +361,17 @@ class UsedMarketCollectRequest(BaseModel):
     keywords: Optional[list[Annotated[str, Field(min_length=1, max_length=100)]]] = Field(default=None, max_length=10)
 
 
+class AdminPriceTestRequest(BaseModel):
+    model_config = {"extra": "forbid"}
+    game_id: int = Field(strict=True, ge=1)
+    platform: str = Field(min_length=1, max_length=100)
+    discounted_price: int = Field(strict=True, ge=0, le=2147483647)
+    original_price: Optional[int] = Field(default=None, strict=True, ge=0, le=2147483647)
+    duration_minutes: int = Field(default=60, strict=True, ge=5, le=120)
+    recipient_email: Optional[str] = Field(default=None, max_length=255)
+    send_email: bool = False
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=ALLOWED_ORIGINS,
@@ -477,18 +496,19 @@ def format_used_market_item(item: UsedMarketItem):
     }
 
 
-def get_current_prices(game):
-    return [
+def get_current_prices(game, *, include_tests=True):
+    observed = [
         price
         for price in game.prices
         if price.is_available
         and is_fresh_current_price(price)
         and snapshot_is_allowed(price)
     ]
+    return effective_prices(game, observed) if include_tests else observed
 
 
-def get_lowest_current_price(game):
-    current_prices = get_current_prices(game)
+def get_lowest_current_price(game, *, include_tests=True):
+    current_prices = get_current_prices(game, include_tests=include_tests)
 
     if not current_prices:
         return None
@@ -616,6 +636,8 @@ def format_game_card(game, selected_price=None):
             price.platform.name for price in current_prices if price.platform
         ],
         "platform_groups": get_current_platform_groups(game),
+        "is_test_price": bool(lowest_price and lowest_price.source == "admin-test"),
+        "test_price_expires_at": to_utc_iso_z(lowest_price.expires_at) if lowest_price and lowest_price.source == "admin-test" else None,
     }
 
     if lowest_price is None:
@@ -651,6 +673,7 @@ def format_game_card(game, selected_price=None):
 def load_games_query(db: Session):
     return db.query(Game).options(
         selectinload(Game.tags),
+        selectinload(Game.price_tests).joinedload(GamePriceTest.platform),
         selectinload(Game.prices.and_(PriceSnapshot.is_current.is_(True))).joinedload(
             PriceSnapshot.platform
         ),
@@ -668,12 +691,15 @@ def format_game_detail(game):
         ),
     )
     history_response = build_history_response(game)
+    observed_current = get_lowest_current_price(game, include_tests=False)
+    prediction_platform = observed_current.platform.name if observed_current and observed_current.platform else history_response["history_platform"]
+    prediction_currency = observed_current.currency if observed_current else history_response["currency"]
     raw_history = [
         p
         for p in game.prices
         if p.platform
-        and p.platform.name == history_response["history_platform"]
-        and p.currency == history_response["currency"]
+        and p.platform.name == prediction_platform
+        and p.currency == prediction_currency
         and p.is_available
         and snapshot_is_allowed(p)
     ]
@@ -697,11 +723,15 @@ def format_game_detail(game):
                 "currency": p.currency,
                 "url": p.url,
                 "collected_at": to_utc_iso_z(p.collected_at),
+                "is_test_price": p.source == "admin-test",
+                "test_price_expires_at": to_utc_iso_z(p.expires_at) if p.source == "admin-test" else None,
             }
             for p in current_prices
             if p.platform
         ],
         **history_response,
+        "active_price_tests": [{"platform": p.platform.name, "discounted_price": int(p.discounted_price),
+                                "expires_at": to_utc_iso_z(p.expires_at)} for p in active_price_tests(game)],
         "prediction": predict_discount_from_history(raw_history),
         "used_market": {
             "digital_lowest": used.digital_lowest,
@@ -738,15 +768,16 @@ def get_period_start(period: str):
 
 
 def build_history_response(
-    game: Game, platform_name: str = "최저가", period: str = "1y", currency=None
+    game: Game, platform_name: str = "최저가", period: str = "1y", currency=None, *, include_test_current=True
 ):
-    current = get_lowest_current_price(game)
+    current = get_lowest_current_price(game, include_tests=include_test_current)
     available_platforms = sorted(
         {
             p.platform.name
             for p in game.prices
             if p.platform and p.is_available and snapshot_is_allowed(p)
         }
+        | {p.platform.name for p in game.price_tests if p.platform}
     )
     selected = platform_name
     if selected == "최저가":
@@ -770,6 +801,7 @@ def build_history_response(
             for p in platform_prices
             if p.is_available and snapshot_is_allowed(p)
         }
+        | {p.currency for p in game.price_tests if p.platform and p.platform.name == selected}
     )
     currency = currency or (
         "KRW"
@@ -847,6 +879,13 @@ def build_history_response(
         "currency": currency,
         "available_currencies": available_currencies,
         "history": history,
+        "test_history": [{"id": p.id, "date": p.collected_at.strftime("%Y-%m-%d"),
+                          "datetime": to_utc_iso_z(p.collected_at), "price": float(p.discounted_price),
+                          "original_price": float(p.original_price), "platform": selected, "currency": currency,
+                          "source": "admin-test", "is_test_price": True, "is_active": p.is_current,
+                          "expires_at": to_utc_iso_z(p.expires_at), "ended_at": to_utc_iso_z(p.ended_at)}
+                         for p in game.price_tests if p.platform and p.platform.name == selected
+                         and p.currency == currency and (not start or p.collected_at >= start)],
         "stats": stats,
         "history_synced_at": to_utc_iso_z(game.history_synced_at),
         "history_error": game.history_error,
@@ -912,14 +951,14 @@ def get_home_data(db: Session = Depends(get_db)):
         card for card in cards if card["has_price"] and card["discounted_price"] > 0
     ]
     discounted = sorted(
-        [card for card in cards_with_price if card["discount_rate"] > 0],
+        [card for card in cards_with_price if card["discount_rate"] > 0 and not card["is_test_price"]],
         key=lambda card: card["discount_rate"],
         reverse=True,
     )
     steam_sales = [
         (game, price)
         for game in games
-        for price in get_current_prices(game)
+        for price in get_current_prices(game, include_tests=False)
         if price.platform and price.platform.name == "Steam" and price.discount_rate > 0
     ]
     steam_sales.sort(
@@ -959,7 +998,7 @@ def get_home_data(db: Session = Depends(get_db)):
             "games": len(cards),
             "software": db.query(Software).count(),
             "used_items": db.query(UsedMarketItem)
-            .filter(UsedMarketItem.source == "중고나라", UsedMarketItem.collected_at >= get_used_market_cutoff())
+            .filter(UsedMarketItem.source == "중고나라", UsedMarketItem.collected_at >= get_used_market_cutoff(), visible_market_clause())
             .count(),
         },
     }
@@ -1122,6 +1161,7 @@ def get_game_detail(game_id: int, db: Session = Depends(get_db)):
             joinedload(Game.prediction),
             joinedload(Game.used_market),
             joinedload(Game.prices).joinedload(PriceSnapshot.platform),
+            selectinload(Game.price_tests).joinedload(GamePriceTest.platform),
         )
         .filter(Game.id == game_id)
         .first()
@@ -1147,7 +1187,7 @@ def get_game_prediction(game_id: int, db: Session = Depends(get_db)):
     if game is None:
         raise HTTPException(status_code=404, detail="Game not found")
 
-    selected_history = build_history_response(game)
+    selected_history = build_history_response(game, include_test_current=False)
     history_prices = [
         price
         for price in game.prices
@@ -1307,7 +1347,8 @@ def get_wishlist(
         .options(
             joinedload(WishlistItem.game)
             .selectinload(Game.prices.and_(PriceSnapshot.is_current.is_(True)))
-            .joinedload(PriceSnapshot.platform)
+            .joinedload(PriceSnapshot.platform),
+            joinedload(WishlistItem.game).selectinload(Game.price_tests).joinedload(GamePriceTest.platform),
         )
         .filter(WishlistItem.user_id == current_user.id)
         .order_by(WishlistItem.created_at.desc())
@@ -1519,6 +1560,7 @@ def list_used_market_items(
         UsedMarketItem.source == "중고나라",
         UsedMarketItem.collected_at >= get_used_market_cutoff(),
         UsedMarketItem.status == "판매중",
+        visible_market_clause(),
     )
 
     keyword = keyword.strip()
@@ -1554,7 +1596,7 @@ def list_used_market_items(
     keywords = [
         row[0]
         for row in db.query(UsedMarketItem.keyword)
-        .filter(UsedMarketItem.source == "중고나라", UsedMarketItem.collected_at >= get_used_market_cutoff(), UsedMarketItem.status == "판매중")
+        .filter(UsedMarketItem.source == "중고나라", UsedMarketItem.collected_at >= get_used_market_cutoff(), UsedMarketItem.status == "판매중", visible_market_clause())
         .distinct()
         .order_by(UsedMarketItem.keyword.asc())
         .all()
@@ -1887,6 +1929,82 @@ def list_admin_game_options(
 ):
     games = db.query(Game.id, Game.title).order_by(Game.title.asc()).all()
     return [{"id": game.id, "title": game.title} for game in games]
+
+
+@app.get("/api/admin/price-tests")
+def admin_price_tests(_admin: User = Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    games = load_games_query(db).order_by(Game.title, Game.id).all()
+    return {"items": list_price_tests(db), "games": [
+        {"id": game.id, "title": game.title, "platforms": [
+            {"name": p.platform.name, "original_price": int(p.original_price),
+             "discounted_price": int(p.discounted_price)}
+            for p in get_current_prices(game, include_tests=False) if p.platform and p.currency == "KRW"
+        ]} for game in games if any(p.currency == "KRW" for p in get_current_prices(game, include_tests=False))
+    ]}
+
+
+@app.post("/api/admin/price-tests", status_code=201)
+def admin_create_price_test(payload: AdminPriceTestRequest,
+                            admin: User = Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    try:
+        result = create_price_test(db, admin=admin, game_id=payload.game_id, platform_name=payload.platform,
+            discounted_price=payload.discounted_price, original_price=payload.original_price,
+            duration_minutes=payload.duration_minutes, recipient_email=payload.recipient_email,
+            send_email=payload.send_email)
+        db.commit()
+        return result
+    except (LookupError, ValueError) as error:
+        db.rollback()
+        raise HTTPException(status_code=404 if isinstance(error, LookupError) else 400, detail=str(error)) from error
+
+
+@app.delete("/api/admin/price-tests/{test_id}")
+def admin_stop_price_test(test_id: int, _admin: User = Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    try:
+        result = stop_price_test(db, test_id)
+        db.commit()
+        return result
+    except LookupError as error:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(error)) from error
+
+
+@app.get("/api/admin/used-market/exclusions")
+def admin_market_exclusions(_admin: User = Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    return [{"id": row.id, "kind": row.kind, "label": row.label, "created_at": to_utc_iso_z(row.created_at)}
+            for row in db.query(UsedMarketExclusion).order_by(UsedMarketExclusion.created_at.desc(), UsedMarketExclusion.id.desc()).all()]
+
+
+@app.delete("/api/admin/used-market/keyword")
+def admin_delete_market_keyword(keyword: str = Query(min_length=1, max_length=100),
+                                admin: User = Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    try:
+        count = delete_market_keyword(db, keyword, admin_id=admin.id)
+        db.commit()
+        return {"message": f"{keyword.strip()} 키워드와 매물 {count}개를 삭제했습니다. 재수집에서 제외합니다.", "deleted_count": count}
+    except ValueError as error:
+        db.rollback()
+        raise HTTPException(status_code=400, detail=str(error)) from error
+
+
+@app.delete("/api/admin/used-market/items/{item_id}")
+def admin_delete_market_item(item_id: int, admin: User = Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    item = db.query(UsedMarketItem).filter_by(id=item_id, source="중고나라").first()
+    if item is None:
+        raise HTTPException(status_code=404, detail="수집 매물을 찾을 수 없습니다.")
+    delete_market_item(db, item, admin_id=admin.id)
+    db.commit()
+    return {"message": "수집 매물을 삭제했습니다. 같은 매물은 재수집에서 제외합니다."}
+
+
+@app.delete("/api/admin/used-market/exclusions/{exclusion_id}")
+def admin_restore_market_exclusion(exclusion_id: int, _admin: User = Depends(get_current_admin_user), db: Session = Depends(get_db)):
+    row = db.get(UsedMarketExclusion, exclusion_id)
+    if row is None:
+        raise HTTPException(status_code=404, detail="재수집 제외 항목을 찾을 수 없습니다.")
+    db.delete(row)
+    db.commit()
+    return {"message": "재수집을 허용했습니다. 삭제한 매물은 다시 수집해야 표시됩니다."}
 
 
 @app.get("/api/admin/auto-refresh")
@@ -2661,6 +2779,7 @@ def reset_collected_data(
         deleted_counts["wishlist_items"] = db.query(WishlistItem).delete()
 
         deleted_counts["prediction_results"] = db.query(PredictionResult).delete()
+        deleted_counts["price_tests"] = db.query(GamePriceTest).delete()
         deleted_counts["price_snapshots"] = db.query(PriceSnapshot).delete()
         deleted_counts["game_tags"] = db.query(GameTag).delete()
         deleted_counts["used_market_summaries"] = db.query(UsedMarketSummary).delete()

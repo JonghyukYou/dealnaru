@@ -26,6 +26,55 @@ def calculate_discount_rate(original_price: int, discounted_price: int) -> float
     return round((1 - discounted_price / original_price) * 100, 2)
 
 
+def notify_wishlist_targets(
+    db, *, game, platform, discounted_price, currency="KRW", url="#",
+    recipient_user_id=None, is_test=False, send_mail=True,
+):
+    query = db.query(WishlistItem).filter(
+        WishlistItem.game_id == game.id, WishlistItem.notify_enabled.is_(True),
+    )
+    if recipient_user_id is not None:
+        query = query.filter(WishlistItem.user_id == recipient_user_id)
+    notification_type = "TEST_TARGET_PRICE" if is_test else "TARGET_PRICE"
+    result = {"notifications_created": 0, "emails_sent": 0, "email_errors": 0}
+    recent_threshold = utc_now() - timedelta(hours=24)
+    for item in query.all():
+        if currency != "KRW" or item.target_price is None or discounted_price > item.target_price:
+            continue
+        # 테스트는 별도 알림 유형이므로 실제 목표가 알림의 24시간 중복 방지에 영향을 주지 않습니다.
+        if not is_test and db.query(Notification.id).filter(
+            Notification.wishlist_item_id == item.id,
+            Notification.type == notification_type,
+            Notification.created_at >= recent_threshold,
+        ).first():
+            continue
+        prefix = "(테스트용) " if is_test else ""
+        notification = Notification(
+            user_id=item.user_id, wishlist_item_id=item.id, type=notification_type,
+            title=f"{prefix}{game.title} 목표가 도달!",
+            message=(f"{prefix}{game.title}의 {platform.name} 가격이 {discounted_price:,}원으로 "
+                     f"내려갔습니다. 설정한 목표가 {item.target_price:,}원 이하입니다."
+                     + (" 관리자 테스트 가격이며 실제 판매 가격은 아닙니다." if is_test else "")),
+            is_read=False,
+        )
+        db.add(notification)
+        db.flush()
+        result["notifications_created"] += 1
+        user = item.user
+        if send_mail and user and user.email_verified and user.email_notifications_enabled:
+            try:
+                extra = {"is_test": True} if is_test else {}
+                send_target_price_email(to=user.email, nickname=user.nickname, game_title=game.title,
+                    platform_name=platform.name, discounted_price=discounted_price,
+                    target_price=item.target_price, game_url=url, **extra)
+                notification.email_sent_at = utc_now()
+                result["emails_sent"] += 1
+            except Exception as error:
+                notification.email_send_error = f"메일 전송 실패 ({type(error).__name__})"
+                result["email_errors"] += 1
+    return result
+
+
 def update_game_price_and_notify(
     db,
     game_id: int,
@@ -109,82 +158,8 @@ def update_game_price_and_notify(
     db.add(new_price)
     db.flush()
 
-    wishlist_items = (
-        db.query(WishlistItem)
-        .filter(
-            WishlistItem.game_id == game.id,
-            WishlistItem.notify_enabled.is_(True),
-        )
-        .all()
-    )
-
-    notifications_created = 0
-    emails_sent = 0
-    email_errors = 0
-
-    recent_threshold = utc_now() - timedelta(hours=24)
-
-    for item in wishlist_items:
-        # 위시리스트 목표가는 KRW. 외화의 숫자를 원화 목표가와 비교하지 않습니다.
-        if currency != "KRW":
-            continue
-        if item.target_price is None:
-            continue
-
-        if discounted_price > item.target_price:
-            continue
-
-        recent_notification = (
-            db.query(Notification)
-            .filter(
-                Notification.wishlist_item_id == item.id,
-                Notification.type == "TARGET_PRICE",
-                Notification.created_at >= recent_threshold,
-            )
-            .first()
-        )
-
-        if recent_notification:
-            continue
-
-        notification = Notification(
-            user_id=item.user_id,
-            wishlist_item_id=item.id,
-            type="TARGET_PRICE",
-            title=f"{game.title} 목표가 도달!",
-            message=(
-                f"{game.title}의 {platform.name} 가격이 "
-                f"{discounted_price:,}원으로 내려갔습니다. "
-                f"설정한 목표가 {item.target_price:,}원 이하입니다."
-            ),
-            is_read=False,
-        )
-
-        db.add(notification)
-        db.flush()
-
-        notifications_created += 1
-
-        user = item.user
-
-        if user and user.email_verified and user.email_notifications_enabled:
-            try:
-                send_target_price_email(
-                    to=user.email,
-                    nickname=user.nickname,
-                    game_title=game.title,
-                    platform_name=platform.name,
-                    discounted_price=discounted_price,
-                    target_price=item.target_price,
-                    game_url=url,
-                )
-
-                notification.email_sent_at = utc_now()
-                emails_sent += 1
-
-            except Exception as error:
-                notification.email_send_error = f"메일 전송 실패 ({type(error).__name__})"
-                email_errors += 1
+    notifications = notify_wishlist_targets(db, game=game, platform=platform,
+        discounted_price=discounted_price, currency=currency, url=url)
 
     return {
         "game_id": game.id,
@@ -193,7 +168,5 @@ def update_game_price_and_notify(
         "original_price": final_original_price,
         "discounted_price": discounted_price,
         "discount_rate": discount_rate,
-        "notifications_created": notifications_created,
-        "emails_sent": emails_sent,
-        "email_errors": email_errors,
+        **notifications,
     }

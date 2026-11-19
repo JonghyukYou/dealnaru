@@ -2801,3 +2801,28 @@ svg { flex-shrink: 0; }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; transition-duration: .01ms !important; animation-duration: .01ms !important; }
 }
+.test-price-badge{display:inline-flex;align-items:center;white-space:nowrap;border:1px solid #e3bb83;border-radius:6px;padding:3px 7px;background:#fff3dc;color:#854308;font-size:.85rem;font-weight:700;line-height:1.3}
+.price-test-panel{margin:24px 0;padding:24px}
+.price-test-panel>p{line-height:1.7;color:#52605b}
+.price-test-form{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin:20px 0}
+.price-test-form>label{display:flex;flex-direction:column;gap:8px;font-size:.95rem;font-weight:600}
+.price-test-form input,.price-test-form select{width:100%;min-width:0;padding:11px;border:1px solid #cbd5cf;border-radius:7px;background:#fff;color:#182922;font:inherit}
+.price-test-form>.checkbox-label{flex-direction:row;align-items:center;align-self:center;line-height:1.6}
+.price-test-form>.checkbox-label input,.market-admin-panel .checkbox-label input{width:auto;flex:0 0 auto}
+.price-test-form>button{align-self:end;min-height:44px}
+.price-test-result,.test-price-notice{padding:16px 20px;border:1px solid #e3bb83;border-radius:8px;background:#fff8e9;color:#77420f;line-height:1.65;margin:16px 0}
+.price-test-result p,.test-price-notice p{margin:6px 0}
+.test-chart-notice{font-size:.9rem;color:#854308;line-height:1.6}
+.active-price-test{display:flex;justify-content:space-between;align-items:center;gap:16px;padding:16px 0;border-bottom:1px solid #dfe6e1}
+.active-price-test p{margin:6px 0}.active-price-test small{color:#52605b}
+.market-admin-panel{border:1px solid #a4bdb1;border-radius:8px;background:#f0f6f3;padding:18px;margin:16px 0;line-height:1.6}
+.market-admin-panel p{margin:8px 0;font-size:.95rem}
+.market-admin-panel summary{cursor:pointer;font-weight:600}
+.market-exclusions{padding:0;list-style:none}
+.market-exclusions li{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:10px 0;border-top:1px solid #ccdcd3}
+.market-exclusions li span{overflow-wrap:anywhere}
+.market-keyword-tabs .market-keyword-tab{display:inline-flex;align-items:stretch;gap:4px}
+.market-keyword-tabs .market-keyword-delete,.market-item-delete{background:#fff4f1;border:1px solid #ddaaa0;color:#942f22;font-size:.9rem}
+.market-keyword-tabs .market-keyword-delete{padding:6px 9px}
+.market-item-delete{margin-top:12px;padding:9px;border-radius:6px;cursor:pointer}
+@media(max-width:760px){.price-test-form{grid-template-columns:1fr}.price-test-panel{padding:18px}.active-price-test,.market-exclusions li{align-items:flex-start;flex-direction:column}.active-price-test>button{width:100%}.market-admin-panel{padding:14px}}

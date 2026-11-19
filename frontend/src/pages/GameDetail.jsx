@@ -2,7 +2,7 @@ import { safeExternalUrl } from "../utils/site-config";
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { useAuth } from "../context/auth-context";
-import { LineChart, Line, XAxis, YAxis, Tooltip, ResponsiveContainer, CartesianGrid } from "recharts";
+import PriceHistoryChart from "../components/PriceHistoryChart";
 import api from "../api/client";
 import GameSearch from "../components/GameSearch";
 import { formatGameMoney } from "../utils/game-format";
@@ -24,6 +24,25 @@ export default function GameDetail() {
   const [historyLoading, setHistoryLoading] = useState(true);
   const [historyError, setHistoryError] = useState("");
   const [page, setPage] = useState(1);
+  useEffect(() => {
+    const controller = new AbortController();
+    let pending = false;
+    const refresh = async () => {
+      if (pending || document.hidden) return;
+      pending = true;
+      try {
+        const [detail, nextHistory] = await Promise.all([
+          api.get(`/api/games/${gameId}`, { signal: controller.signal }),
+          api.get(`/api/games/${gameId}/history`, { params: { platform, period, currency: currency || undefined }, signal: controller.signal }),
+        ]);
+        if (!controller.signal.aborted) { setGame(detail.data); setHistory(nextHistory.data); }
+      } catch { /* 표시 중인 자료는 유지하고 다음 갱신에서 다시 확인합니다. */ }
+      finally { pending = false; }
+    };
+    const timer = window.setInterval(refresh, 30000);
+    window.addEventListener("focus", refresh);
+    return () => { controller.abort(); window.clearInterval(timer); window.removeEventListener("focus", refresh); };
+  }, [gameId, platform, period, currency]);
   useEffect(() => {
     const controller = new AbortController();
     const load = async () => {
@@ -95,11 +114,7 @@ export default function GameDetail() {
   const safePage = Math.min(page, totalPages);
   const visible = prices.slice((safePage - 1) * 8, safePage * 8);
   const stats = history?.stats;
-  const chart = (history?.history || []).map((row) => ({ ...row, timestamp: Date.parse(row.datetime) }));
   const chartCurrency = history?.currency || "KRW";
-  const intraday = chart.length > 0 && chart.at(-1).timestamp - chart[0].timestamp < 2 * 86400000;
-  const chartDomain = chart.length && chart[0].timestamp === chart.at(-1).timestamp
-    ? [chart[0].timestamp - 3600000, chart[0].timestamp + 3600000] : ["dataMin", "dataMax"];
   const historyMessage = !history ? "가격 이력 상태를 확인하는 중입니다."
     : ["queued", "pending"].includes(history?.history_status)
     ? "ITAD 과거 가격 이력 보강 대기 중입니다. 완료되면 차트가 자동으로 갱신됩니다."
@@ -114,9 +129,10 @@ export default function GameDetail() {
   return <div className="page detail-page">
     <GameSearch compact onSearch={(keyword) => navigate(keyword ? `/games?keyword=${encodeURIComponent(keyword)}` : "/games")} />
     <div className="breadcrumb"><Link to="/">홈</Link><span>&gt;</span><Link to="/games">게임</Link><span>&gt;</span><strong>{game.title}</strong></div>
+    {game.active_price_tests?.length > 0 && <aside className="test-price-notice" role="status"><strong>테스트용 가격 적용 중</strong><p>{game.active_price_tests.map((row) => `${row.platform}: ${formatGameMoney(row.discounted_price, "KRW")} · ${formatCheckedAt(row.expires_at)} 자동 해제`).join(" / ")}</p><p>관리자가 알림 확인을 위해 설정한 가격입니다. 실제 판매 가격은 구매처에서 확인하세요.</p></aside>}
     <section className="detail-hero"><div className="cover detail-cover" style={{ backgroundColor: game.image_color, backgroundImage: game.header_image ? `url(${game.header_image})` : undefined, backgroundSize: "cover", backgroundPosition: "center" }}>{!game.header_image && <span>{game.title}</span>}</div>
       <div className="detail-main-info"><h1>{game.title}</h1><p>{[game.developer, game.publisher].filter(Boolean).join(" · ")}</p>
-        <div className="lowest-price-box"><span>{lowest ? lowest.currency === "KRW" ? "현재 최저가" : `현재 확인 가격 (${lowest.currency} 기준)` : "가격 확인 대기"}</span><strong>{formatGameMoney(lowest?.discounted_price, lowest?.currency)}</strong><p>{lowest ? `${lowest.platform} · ${lowest.discount_rate > 0 ? `${lowest.discount_rate}% 할인` : "현재 정상가"}` : "인기 게임 카탈로그에 등록되었습니다. 다음 갱신에서 구매처 가격과 이력을 확인합니다."}</p></div>
+        <div className="lowest-price-box"><span>{lowest?.is_test_price ? "현재 표시 가격 (테스트용)" : lowest ? lowest.currency === "KRW" ? "현재 최저가" : `현재 확인 가격 (${lowest.currency} 기준)` : "가격 확인 대기"}</span><strong>{formatGameMoney(lowest?.discounted_price, lowest?.currency)}</strong><p>{lowest ? `${lowest.platform} · ${lowest.discount_rate > 0 ? `${lowest.discount_rate}% 할인` : "현재 정상가"}` : "인기 게임 카탈로그에 등록되었습니다. 다음 갱신에서 구매처 가격과 이력을 확인합니다."}</p></div>
         <div className="detail-button-row">{safeExternalUrl(lowest?.url || game.store_url) && <a href={safeExternalUrl(lowest?.url || game.store_url)} className="primary-button" target="_blank" rel="noreferrer">{lowest ? "구매처에서 확인" : "공식 게임 페이지"} ↗</a>}<button className="secondary-button" onClick={addWishlist}>{wishlisted ? "✓ 위시리스트 저장됨" : "+ 위시리스트"}</button></div>
         <div className="tag-wrap">{(game.tags || []).map((tag) => <span key={tag}>{tag}</span>)}</div>
         <div className="meta-grid"><p><strong>출시일</strong>{game.release_date || "확인 중"}</p><p><strong>평가</strong>{game.rating || "평가 정보 확인 중"} · {(game.review_count || 0).toLocaleString()}개</p><p><strong>한국어 지원</strong>{game.korean_support || "공식 페이지 확인"}</p></div>
@@ -126,7 +142,7 @@ export default function GameDetail() {
     <section className="detail-grid">
       <article className="panel price-compare-panel"><h2>구매처별 현재 가격</h2><p className="subscription-notice">{prices.length}개 구매처 · 원화 가격을 먼저 비교합니다. 외화 금액은 해당 통화로 표시합니다.</p>
         {prices.length === 0 && <p>아직 확인된 현재 가격이 없습니다. 게임 목록은 유지되며 자동 갱신 때 다시 확인합니다.</p>}
-        <div className="price-table">{visible.map((price) => <div className="price-table-row" key={`${price.platform}-${price.currency}`}><div><strong>{price.platform}</strong><span>{price.discount_rate > 0 ? `-${price.discount_rate}%` : "정상가"} · {price.currency}</span></div><div><strong>{formatGameMoney(price.discounted_price, price.currency)}</strong>{price.discount_rate > 0 && <del>{formatGameMoney(price.original_price, price.currency)}</del>}<small>{formatCheckedAt(price.collected_at)} 확인</small></div>{safeExternalUrl(price.url) && <a href={safeExternalUrl(price.url)} target="_blank" rel="noreferrer">구매처 ↗</a>}</div>)}</div>
+        <div className="price-table">{visible.map((price) => <div className="price-table-row" key={`${price.platform}-${price.currency}`}><div><strong>{price.platform}</strong>{price.is_test_price && <span className="test-price-badge">테스트용</span>}<span>{price.discount_rate > 0 ? `-${price.discount_rate}%` : "정상가"} · {price.currency}</span></div><div><strong>{formatGameMoney(price.discounted_price, price.currency)}</strong>{price.discount_rate > 0 && <del>{formatGameMoney(price.original_price, price.currency)}</del>}<small>{formatCheckedAt(price.collected_at)} {price.is_test_price ? "테스트 설정" : "확인"}</small></div>{safeExternalUrl(price.url) && <a href={safeExternalUrl(price.url)} target="_blank" rel="noreferrer">구매처 ↗</a>}</div>)}</div>
         {totalPages > 1 && <div className="pagination"><button disabled={safePage === 1} onClick={() => setPage(safePage - 1)}>이전</button><span>{safePage}/{totalPages}</span><button disabled={safePage === totalPages} onClick={() => setPage(safePage + 1)}>다음</button></div>}
       </article>
       <article className="panel prediction-panel"><h2>할인 예측</h2><div className="prediction-grid"><div><span>다음 할인 예상 시점</span><strong>{prediction.expected_date || "이력 수집 대기"}</strong><p>{prediction.expected_event}</p></div><div><span>예상 할인율</span><strong>{prediction.expected_discount_rate || "분석 대기"}</strong><p>신뢰도: {prediction.confidence || "데이터 부족"}</p></div></div><p className="prediction-reason">{prediction.reason}</p>
@@ -139,7 +155,7 @@ export default function GameDetail() {
       </div>
         <p className="subscription-notice" aria-live="polite">{historyMessage}</p>
         <p className="admin-help-text">{history?.price_filter_notice}</p>
-        <div className="chart-box">{historyLoading ? <div className="empty-chart-box">가격 이력을 불러오는 중...</div> : historyError ? <div className="empty-chart-box" role="alert">{historyError}</div> : chart.length === 0 ? <div className="empty-chart-box">선택한 구매처·기간의 확인된 이력이 없습니다.</div> : <ResponsiveContainer width="100%" height={280}><LineChart data={chart}><CartesianGrid strokeDasharray="3 3" /><XAxis dataKey="timestamp" type="number" scale="time" domain={chartDomain} tickCount={6} minTickGap={25} tickFormatter={(value) => new Date(value).toLocaleString("ko-KR", intraday ? { hour: "2-digit", minute: "2-digit" } : { year: "numeric", month: "2-digit", day: "2-digit" })} /><YAxis tickFormatter={(value) => chartCurrency === "KRW" ? `${Math.floor(value / 1000)}천` : value} /><Tooltip formatter={(value) => [formatGameMoney(value, chartCurrency), "가격"]} labelFormatter={(label) => `가격 시점: ${new Date(Number(label)).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}`} /><Line type="stepAfter" dataKey="price" stroke="#0f766e" strokeWidth={2.5} dot={chart.length < 50 ? { r: 3 } : false} connectNulls={false} /></LineChart></ResponsiveContainer>}</div>
+        <div className="chart-box">{historyLoading ? <div className="empty-chart-box">가격 이력을 불러오는 중...</div> : historyError ? <div className="empty-chart-box" role="alert">{historyError}</div> : <PriceHistoryChart history={history || {}} />}</div>
         {stats && <div className="stats-grid"><p><span>분석 기간</span><strong>{periods.find((item) => item.value === stats.period)?.label || stats.period}</strong></p><p><span>선택 기간 최저가</span><strong>{formatGameMoney(stats.lowest_price, chartCurrency)}</strong></p><p><span>할인 시작 횟수</span><strong>{stats.discount_count}회</strong></p><p><span>평균 최대 할인율</span><strong>{stats.average_discount_rate}%</strong></p></div>}
       </article>
     </section>

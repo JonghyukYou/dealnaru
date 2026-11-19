@@ -31,7 +31,7 @@ function Wishlist() {
         };
       });
 
-      setEditValues(nextEditValues);
+      setEditValues((current) => Object.fromEntries(response.data.map((item) => [item.id, current[item.id] || nextEditValues[item.id]])));
     } catch {
       alert("위시리스트를 불러오지 못했습니다. 다시 로그인해주세요.");
     } finally {
@@ -88,6 +88,9 @@ function Wishlist() {
 
   useEffect(() => {
     fetchWishlist();
+    const timer = window.setInterval(() => { if (!document.hidden) fetchWishlist(); }, 30000);
+    window.addEventListener("focus", fetchWishlist);
+    return () => { window.clearInterval(timer); window.removeEventListener("focus", fetchWishlist); };
   }, [fetchWishlist]);
 
   if (isLoading) {
@@ -131,13 +134,14 @@ function Wishlist() {
 
                     <div className="price-row">
                       <strong>{formatGameMoney(game.discounted_price, game.currency)}</strong>
+                      {game.is_test_price && <span className="test-price-badge">테스트용</span>}
                       {game.discount_rate > 0 && <del>{formatGameMoney(game.original_price, game.currency)}</del>}
                       {game.discount_rate > 0 ? <span className="discount-badge">-{game.discount_rate}%</span> : <span className="catalog-status">{game.price_status}</span>}
                     </div>
 
                     {game.is_target_reached && (
                       <p className="target-reached-text">
-                        목표가 도달! 지금 확인해보세요.
+                        {game.is_test_price ? "(테스트용) 목표가 도달! 실제 판매 가격은 구매처에서 확인하세요." : "목표가 도달! 지금 확인해보세요."}
                       </p>
                     )}
                   </div>

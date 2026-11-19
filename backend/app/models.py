@@ -72,6 +72,9 @@ class Game(Base):
     wishlist_items = relationship(
         "WishlistItem", back_populates="game", cascade="all, delete-orphan"
     )
+    price_tests = relationship(
+        "GamePriceTest", back_populates="game", cascade="all, delete-orphan"
+    )
 
 
 class GameTag(Base):
@@ -120,6 +123,42 @@ class PriceSnapshot(Base):
 
     game = relationship("Game", back_populates="prices")
     platform = relationship("Platform", back_populates="prices")
+
+
+class GamePriceTest(Base):
+    """운영 관측값과 분리한, 만료 시간이 있는 관리자 가격 테스트."""
+    __tablename__ = "game_price_tests"
+    __table_args__ = (Index("ix_game_price_tests_active", "game_id", "active"),)
+
+    id = Column(Integer, primary_key=True)
+    game_id = Column(Integer, ForeignKey("games.id"), nullable=False)
+    platform_id = Column(Integer, ForeignKey("platforms.id"), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    recipient_user_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    original_price = Column(Numeric(12, 2), nullable=False)
+    discounted_price = Column(Numeric(12, 2), nullable=False)
+    discount_rate = Column(Numeric(5, 2), nullable=False)
+    currency = Column(String(10), nullable=False, default="KRW")
+    url = Column(Text, nullable=True)
+    active = Column(Boolean, nullable=False, default=True)
+    collected_at = Column(DateTime, nullable=False, default=utc_now)
+    expires_at = Column(DateTime, nullable=False)
+    ended_at = Column(DateTime, nullable=True)
+    game = relationship("Game", back_populates="price_tests")
+    platform = relationship("Platform")
+
+    @property
+    def is_current(self):
+        return bool(self.active and self.expires_at and self.expires_at > utc_now())
+
+    @property
+    def source(self):
+        return "admin-test"
+
+    @property
+    def sale_end_at(self):
+        # 테스트 만료를 실제 판매처의 할인 종료 시각으로 표시하지 않습니다.
+        return None
 
 
 class PredictionResult(Base):
@@ -176,6 +215,19 @@ class UsedMarketItem(Base):
     status = Column(String(50), default="판매중", nullable=False)
 
     collected_at = Column(DateTime, default=utc_now, nullable=False)
+
+
+class UsedMarketExclusion(Base):
+    __tablename__ = "used_market_exclusions"
+
+    id = Column(Integer, primary_key=True)
+    key = Column(String(64), unique=True, nullable=False)
+    source = Column(String(50), nullable=False, default="중고나라")
+    kind = Column(String(20), nullable=False)
+    value = Column(Text, nullable=False)
+    label = Column(String(255), nullable=False)
+    created_by_id = Column(Integer, ForeignKey("users.id", ondelete="SET NULL"), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=utc_now)
 
 
 class User(Base):

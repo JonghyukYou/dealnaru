@@ -84,7 +84,7 @@ function Notifications() {
               key={notification.id}
             >
               <div>
-                <span className="notification-type">{notification.type}</span>
+                <span className={notification.type === "TEST_TARGET_PRICE" ? "test-price-badge" : "notification-type"}>{notification.type === "TEST_TARGET_PRICE" ? "테스트용 목표가 알림" : notification.type === "TARGET_PRICE" ? "목표가 알림" : notification.type}</span>
                 <h2>{notification.title}</h2>
                 <p>{notification.message}</p>
                 <small>

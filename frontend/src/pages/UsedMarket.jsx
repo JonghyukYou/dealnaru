@@ -1,14 +1,16 @@
 import { safeExternalUrl } from "../utils/site-config";
 import { useEffect, useState } from "react";
 import { useSearchParams } from "react-router-dom";
-import api from "../api/client";
+import api, { apiError } from "../api/client";
 import GameSearch from "../components/GameSearch";
+import { useAuth } from "../context/auth-context";
 
 function formatPrice(price) {
   return price > 0 ? `${Number(price).toLocaleString("ko-KR")}원` : "가격 미공개";
 }
 
 export default function UsedMarket() {
+  const { user } = useAuth();
   const [searchParams, setSearchParams] = useSearchParams();
   const keyword = searchParams.get("keyword") || "전체";
   const sort = searchParams.get("sort") === "price" ? "price" : "recent";
@@ -19,6 +21,12 @@ export default function UsedMarket() {
   const [isLoading, setIsLoading] = useState(true);
   const [error, setError] = useState("");
   const [reload, setReload] = useState(0);
+  const [editing, setEditing] = useState(false);
+  const [exclusions, setExclusions] = useState([]);
+  const [busy, setBusy] = useState(false);
+  const [notice, setNotice] = useState("");
+  const [actionError, setActionError] = useState("");
+  const canEdit = Boolean(user?.is_admin && editing);
   const update = (changes) => {
     const params = new URLSearchParams(searchParams);
     params.delete("source");
@@ -30,6 +38,30 @@ export default function UsedMarket() {
     setSearchParams(params);
   };
   const search = (value) => update({ keyword: value });
+  const moderate = async (path, options = {}, success) => {
+    setBusy(true); setActionError(""); setNotice("");
+    try {
+      const response = await api.delete(path, options);
+      setNotice(response.data.message); success?.(); setReload((value) => value + 1);
+    } catch (e) { setActionError(apiError(e, "중고 매물 관리 작업에 실패했습니다.")); }
+    finally { setBusy(false); }
+  };
+  const deleteKeyword = (value) => {
+    if (!confirm(`‘${value}’ 키워드 탭과 이 키워드로 수집한 매물을 모두 삭제하고 재수집에서 제외할까요?`)) return;
+    moderate("/api/admin/used-market/keyword", { params: { keyword: value } }, () => { if (keyword === value) search("전체"); });
+  };
+  const deleteItem = (item) => {
+    if (!confirm(`‘${item.title}’ 수집 매물을 삭제하고 다시 수집되지 않게 할까요?`)) return;
+    moderate(`/api/admin/used-market/items/${item.id}`);
+  };
+  useEffect(() => {
+    if (!canEdit) return;
+    const controller = new AbortController();
+    api.get("/api/admin/used-market/exclusions", { signal: controller.signal })
+      .then(({ data }) => { if (!controller.signal.aborted) setExclusions(data); })
+      .catch((e) => { if (!controller.signal.aborted) setActionError(apiError(e, "재수집 제외 목록을 불러오지 못했습니다.")); });
+    return () => controller.abort();
+  }, [canEdit, reload]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -43,9 +75,15 @@ export default function UsedMarket() {
 
   return <div className="page used-market-page">
     <section className="category-header"><h1>중고 거래 둘러보기</h1><p>중고나라의 공개 게임 패키지 매물을 비교하세요. 최근 14일 안에 수집한 정보이며, 출처의 접속 제한에 따라 갱신이 지연될 수 있습니다.</p></section>
+    {user?.is_admin && <aside className="market-admin-panel" aria-label="관리자 중고 매물 관리">
+      <label className="checkbox-label"><input type="checkbox" checked={editing} onChange={(e) => setEditing(e.target.checked)} />관리자 편집</label>
+      <p>편집을 켜면 매물별 삭제와 키워드 전체 삭제를 할 수 있습니다. 삭제 항목은 재수집에서 제외하며 원본 중고나라 게시글에는 영향을 주지 않습니다.</p>
+      {notice && <p role="status">{notice}</p>}{actionError && <p className="form-error" role="alert">{actionError}</p>}
+      {canEdit && exclusions.length > 0 && <details><summary>재수집 제외 목록 ({exclusions.length}개)</summary><ul className="market-exclusions">{exclusions.map((row) => <li key={row.id}><span>{row.kind === "keyword" ? "키워드" : "매물"}: {row.label}</span><button type="button" className="secondary-button" disabled={busy} onClick={() => moderate(`/api/admin/used-market/exclusions/${row.id}`)}>재수집 허용</button></li>)}</ul></details>}
+    </aside>}
     <section className="software-search-panel">
       <GameSearch keyword={keyword === "전체" ? "" : keyword} searchLabel="중고 매물 검색" placeholder="매물 제목·키워드 검색 · 엘든링, 닌텐도" onSearch={search} />
-      <div className="genre-button-wrap">{keywords.map((item) => <button key={item} className={keyword === item ? "active" : ""} aria-pressed={keyword === item} onClick={() => search(item)}>{item}</button>)}</div>
+      <div className="genre-button-wrap market-keyword-tabs">{keywords.map((item) => <span className="market-keyword-tab" key={item}><button className={keyword === item ? "active" : ""} aria-pressed={keyword === item} onClick={() => search(item)}>{item}</button>{canEdit && item !== "전체" && <button className="market-keyword-delete" aria-label={`${item} 키워드와 매물 삭제`} disabled={busy} onClick={() => deleteKeyword(item)}>삭제</button>}</span>)}</div>
       <div className="market-filters">
         <label>정렬 <select value={sort} onChange={(event) => update({ sort: event.target.value })}><option value="recent">최저가 강조 · 최근 수집 순</option><option value="price">낮은 가격 순</option></select></label>
       </div>
@@ -60,6 +98,7 @@ export default function UsedMarket() {
         <h2>{item.title}</h2><strong className="used-market-price">{formatPrice(item.price)}</strong>
         <div className="used-market-meta"><span>{item.status} · 수집 시점 기준</span>{item.location && <span>{item.location}</span>}{item.posted_at_text && <span>게시 당시: {item.posted_at_text}</span>}{item.collected_at && <span>수집: {new Date(item.collected_at).toLocaleString("ko-KR", { timeZone: "Asia/Seoul" })}</span>}</div>
         {safeExternalUrl(item.item_url) && <a href={safeExternalUrl(item.item_url)} target="_blank" rel="noreferrer" className="used-market-link">매물 확인하기</a>}
+        {canEdit && <button type="button" className="market-item-delete" disabled={busy} onClick={() => deleteItem(item)} aria-label={`${item.title} 수집 매물 삭제`}>수집 매물 삭제</button>}
       </article>)}</section>
       {pageInfo?.total_pages > 1 && <nav className="pagination" aria-label="중고 매물 페이지"><button disabled={pageInfo.page <= 1} onClick={() => update({ page: String(pageInfo.page - 1) })}>이전</button><span className="pagination-current">{pageInfo.page} / {pageInfo.total_pages}</span><button disabled={pageInfo.page >= pageInfo.total_pages} onClick={() => update({ page: String(pageInfo.page + 1) })}>다음</button></nav>}
     </>}

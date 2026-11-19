@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import api, { apiError } from "../api/client";
-import { publicDeployment } from "../utils/site-config";
+import { Link } from "react-router-dom";
+import PriceTestPanel from "../components/PriceTestPanel";
 import RequestedGameCollector from "../components/RequestedGameCollector";
 import LogPagination from "../components/LogPagination";
 
@@ -31,7 +32,6 @@ function formatKoreanDateTime(value) {
 
 function AdminCollect() {
   const [logs, setLogs] = useState([]);
-  const [games, setGames] = useState([]);
   const [isLoading, setIsLoading] = useState(true);
   const [schedule, setSchedule] = useState(null);
   const [scheduleForm, setScheduleForm] = useState(null);
@@ -51,12 +51,6 @@ function AdminCollect() {
   const [usedMarketResult, setUsedMarketResult] = useState(null);
   const [isUsedMarketLoading, setIsUsedMarketLoading] = useState(false);
 
-  const [gameId, setGameId] = useState("");
-  const [platform, setPlatform] = useState("Steam");
-  const [originalPrice, setOriginalPrice] = useState("");
-  const [discountedPrice, setDiscountedPrice] = useState("");
-  const [isChangingPrice, setIsChangingPrice] = useState(false);
-
   const [logPage, setLogPage] = useState(1);
   const [logPageSize, setLogPageSize] = useState(10);
   const [logView, setLogView] = useState("summary");
@@ -73,11 +67,10 @@ function AdminCollect() {
       }
 
       try {
-        const [logsResult, gamesResult, scheduleResult] = await Promise.allSettled([
+        const [logsResult, scheduleResult] = await Promise.allSettled([
           api.get("/api/admin/crawling-logs", {
             params: { page, page_size: logPageSize, view: logView, filter: logFilter },
           }),
-          publicDeployment ? Promise.resolve({ data: [] }) : api.get("/api/admin/game-options"),
           api.get("/api/admin/auto-refresh"),
         ]);
 
@@ -95,17 +88,6 @@ function AdminCollect() {
           setLogTotalPages(1);
         }
 
-        if (gamesResult.status === "fulfilled") {
-          const nextGames = gamesResult.value.data || [];
-          setGames(nextGames);
-          setGameId((currentGameId) => {
-            return currentGameId || (nextGames[0] ? String(nextGames[0].id) : "");
-          });
-        } else {
-          console.error("game options error:", gamesResult.reason);
-          setGames([]);
-        }
-
         if (scheduleResult.status === "fulfilled") {
           setSchedule(scheduleResult.value.data);
           setScheduleForm((current) => current || scheduleResult.value.data);
@@ -113,7 +95,7 @@ function AdminCollect() {
         } else {
           setScheduleError("자동 갱신 상태를 불러오지 못했습니다.");
         }
-        const results = [logsResult, gamesResult, scheduleResult];
+        const results = [logsResult, scheduleResult];
         const statusCodes = results
           .filter((result) => result.status === "rejected")
           .map((result) => result.reason?.response?.status);
@@ -209,46 +191,6 @@ function AdminCollect() {
       alert(apiError(error, "중고마켓 수집에 실패했습니다. 검색어는 최대 10개, 키워드당 개수는 1~20개로 확인해 주세요."));
     } finally {
       setIsUsedMarketLoading(false);
-    }
-  };
-
-  const handleChangePrice = async (event) => {
-    event.preventDefault();
-
-    if (!gameId) {
-      alert("게임을 선택해주세요.");
-      return;
-    }
-
-    if (discountedPrice === "") {
-      alert("변경할 가격을 입력해주세요.");
-      return;
-    }
-
-    const payload = {
-      game_id: Number(gameId),
-      platform,
-      discounted_price: Number(discountedPrice),
-      original_price: originalPrice === "" ? null : Number(originalPrice),
-    };
-
-    if (Number.isNaN(payload.discounted_price) || payload.discounted_price < 0) {
-      alert("변경 가격은 0 이상의 숫자여야 합니다.");
-      return;
-    }
-
-    try {
-      setIsChangingPrice(true);
-      const response = await api.post("/api/admin/collect-price", payload);
-
-      alert(response.data.message);
-      setOriginalPrice("");
-      setDiscountedPrice("");
-      await refreshAfterAction();
-    } catch (error) {
-      alert(error.response?.data?.detail || "수동 가격 변경에 실패했습니다.");
-    } finally {
-      setIsChangingPrice(false);
     }
   };
 
@@ -433,7 +375,7 @@ function AdminCollect() {
 
         <div className="collection-row">
           <div className="collection-row-heading">
-            <strong>중고마켓</strong>
+            <strong>중고마켓</strong><Link to="/used-market">매물·키워드 관리</Link>
             <span>중고나라 공개 매물 · 14일 초과 데이터 자동 삭제 · 출처의 접속 제한 시 중단</span>
           </div>
           <label>검색어 (쉼표 구분, 최대 10개)<input value={usedMarketKeywords} onChange={(event) => setUsedMarketKeywords(event.target.value)} placeholder="엘든링, 젤다" maxLength={1000} /></label>
@@ -457,73 +399,8 @@ function AdminCollect() {
         </div>}
       </section>
 
-      <section className={publicDeployment ? "admin-layout production-layout" : "admin-layout"}>
-        {!publicDeployment && <article className="panel">
-          <h2>수동 가격 변경</h2>
-
-          <form className="admin-form" onSubmit={handleChangePrice}>
-            <label>
-              게임
-              <select
-                value={gameId}
-                onChange={(event) => setGameId(event.target.value)}
-              >
-                {games.map((game) => (
-                  <option value={game.id} key={game.id}>
-                    {game.title}
-                  </option>
-                ))}
-              </select>
-            </label>
-
-            <label>
-              플랫폼
-              <select
-                value={platform}
-                onChange={(event) => setPlatform(event.target.value)}
-              >
-                <option>Steam</option>
-                <option>Epic</option>
-                <option>GOG</option>
-                <option>Fanatical</option>
-                <option>PS Store</option>
-              </select>
-            </label>
-
-            <label>
-              원가
-              <input
-                type="number"
-                min="0"
-                value={originalPrice}
-                onChange={(event) => setOriginalPrice(event.target.value)}
-                placeholder="비워두면 기존 원가 사용"
-              />
-            </label>
-
-            <label>
-              변경 가격
-              <input
-                type="number"
-                min="0"
-                value={discountedPrice}
-                onChange={(event) => setDiscountedPrice(event.target.value)}
-                placeholder="예: 29000"
-                required
-              />
-            </label>
-
-            <button type="submit" disabled={isChangingPrice || !gameId}>
-              {isChangingPrice ? "변경 중..." : "가격 변경 적용"}
-            </button>
-          </form>
-
-          <p className="admin-help-text">
-            실제 수집이 아니라 관리자가 입력한 값으로 현재 가격을 변경합니다.
-            목표가 조건을 충족하면 위시리스트 알림도 생성됩니다.
-          </p>
-        </article>}
-
+      <PriceTestPanel />
+      <section className="admin-layout production-layout">
         <article className="panel">
           <h2>수집 로그</h2>
           <div className="admin-log-filters">
