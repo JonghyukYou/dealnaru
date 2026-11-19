@@ -1,0 +1,104 @@
+name: dealnaru
+
+x-logging: &limited-logs
+  driver: json-file
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  db:
+    image: postgres:18-bookworm
+    restart: unless-stopped
+    stop_grace_period: 45s
+    environment:
+      POSTGRES_DB: dealnaru
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in the root .env}
+      DB_APP_PASSWORD: ${DB_APP_PASSWORD:?Set DB_APP_PASSWORD in the root .env}
+    volumes:
+      - pgdata:/var/lib/postgresql
+      - ./deploy/init-app-db.sh:/docker-entrypoint-initdb.d/10-app.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U postgres -d dealnaru"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    logging: *limited-logs
+    networks: [data]
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    stop_grace_period: 60s
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      APP_ENV: production
+      DATABASE_URL: postgresql+psycopg2://dealnaru_app:${DB_APP_PASSWORD:?Set DB_APP_PASSWORD in the root .env}@db:5432/dealnaru
+      FRONTEND_BASE_URL: https://${SITE_DOMAIN:-dealnaru.life}
+      ALLOWED_ORIGINS: https://${SITE_DOMAIN:-dealnaru.life}
+      EMAIL_VERIFICATION_REQUIRED: "true"
+      EMAIL_DEV_MODE: "false"
+      EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: "24"
+      RESEND_API_KEY: ${RESEND_API_KEY:?Set the verified-domain sending key}
+      MAIL_FROM: ${MAIL_FROM:?Set the verified sender address}
+      ITAD_API_KEY: ${ITAD_API_KEY:-}
+      AUTO_REFRESH_ENABLED: ${AUTO_REFRESH_ENABLED:-true}
+      AUTO_REFRESH_INTERVAL_MINUTES: "360"
+      CURRENT_PRICE_MAX_AGE_HOURS: "168"
+      USED_MARKET_MAX_AGE_DAYS: "14"
+      USED_MARKET_ENABLED: ${USED_MARKET_ENABLED:-false}
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000",
+              "--workers", "1", "--no-server-header", "--no-access-log",
+              "--proxy-headers", "--forwarded-allow-ips", "172.30.223.2",
+              "--timeout-graceful-shutdown", "45"]
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).close()"]
+      interval: 15s
+      timeout: 5s
+      retries: 8
+      start_period: 45s
+    security_opt: ["no-new-privileges:true"]
+    logging: *limited-logs
+    networks: [edge, data]
+
+  web:
+    build:
+      context: .
+      dockerfile: deploy/Web.Dockerfile
+      args:
+        VITE_REPOSITORY_URL: ${VITE_REPOSITORY_URL:?Set the public project repository}
+        VITE_OPERATOR_NAME: ${VITE_OPERATOR_NAME:?Set the operator name}
+        VITE_SUPPORT_EMAIL: ${VITE_SUPPORT_EMAIL:?Set a monitored contact mailbox}
+        VITE_HOSTING_NOTICE: ${VITE_HOSTING_NOTICE:?Describe actual hosting in the privacy policy}
+        VITE_MAIL_NOTICE: ${VITE_MAIL_NOTICE:?Describe actual email processing in the privacy policy}
+        VITE_RETENTION_NOTICE: ${VITE_RETENTION_NOTICE:?Describe actual backup retention in the privacy policy}
+        VITE_PRIVACY_OFFICER: ${VITE_PRIVACY_OFFICER:?Set the actual privacy contact name or department}
+        VITE_OVERSEAS_NOTICE: ${VITE_OVERSEAS_NOTICE:?Describe actual overseas processing and applicable basis}
+    restart: unless-stopped
+    depends_on:
+      api:
+        condition: service_healthy
+    environment:
+      SITE_DOMAIN: ${SITE_DOMAIN:-dealnaru.life}
+      ACME_EMAIL: ${ACME_EMAIL:?Set the TLS contact email}
+    ports: ["80:80", "443:443"]
+    volumes:
+      - caddy_data:/data
+      - caddy_config:/config
+    logging: *limited-logs
+    networks:
+      edge:
+        ipv4_address: 172.30.223.2
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
+networks:
+  edge:
+    ipam:
+      config: [{subnet: 172.30.223.0/24}]
+  data:
+    internal: true
