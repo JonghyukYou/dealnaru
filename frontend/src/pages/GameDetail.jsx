@@ -121,7 +121,7 @@ export default function GameDetail() {
     : history?.history_status === "running" ? "과거 가격 변경 이력을 가져오는 중입니다. 완료되면 자동으로 표시합니다."
     : history?.history_status === "unconfigured" ? "외부 가격 이력 수집 연결이 설정되지 않았습니다. 관리자에게 연결 설정을 요청해주세요."
     : history?.history_status === "unlinked" ? "등록된 구매처 연결이 없어 과거 이력을 조회할 수 없습니다. 관리자에게 게임 연결 보강을 요청해주세요."
-    : history?.history_status === "needs_check" ? history.history_error || "외부 가격 이력을 다시 확인해야 합니다."
+    : history?.history_status === "needs_check" ? ""
     : history?.external_history_count > 0 ? `외부 이력 확인: ${formatCheckedAt(history.history_synced_at)} · 선택 구매처 이력 ${history.external_history_count}건`
     : history?.external_history_total > 0 ? "이 구매처에는 확인된 과거 이력이 없습니다. 다른 구매처를 선택해주세요."
     : "ITAD가 제공한 과거 이력이 없습니다. 확인된 가격 관측만 표시합니다.";
@@ -153,7 +153,7 @@ export default function GameDetail() {
           {(history?.available_currencies?.length || 0) > 1 && <select aria-label="히스토리 통화" value={currency || chartCurrency} onChange={(e) => setCurrency(e.target.value)}>{history.available_currencies.map((value) => <option key={value}>{value}</option>)}</select>}
           <div className="period-buttons">{periods.map((item) => <button key={item.value} className={period === item.value ? "active" : ""} onClick={() => setPeriod(item.value)}>{item.label}</button>)}</div></div>
       </div>
-        <p className="subscription-notice" aria-live="polite">{historyMessage}</p>
+        {historyMessage && <p className="subscription-notice" aria-live="polite">{historyMessage}</p>}
         <p className="admin-help-text">{history?.price_filter_notice}</p>
         <div className="chart-box">{historyLoading ? <div className="empty-chart-box">가격 이력을 불러오는 중...</div> : historyError ? <div className="empty-chart-box" role="alert">{historyError}</div> : <PriceHistoryChart history={history || {}} />}</div>
         {stats && <div className="stats-grid"><p><span>분석 기간</span><strong>{periods.find((item) => item.value === stats.period)?.label || stats.period}</strong></p><p><span>선택 기간 최저가</span><strong>{formatGameMoney(stats.lowest_price, chartCurrency)}</strong></p><p><span>할인 시작 횟수</span><strong>{stats.discount_count}회</strong></p><p><span>평균 최대 할인율</span><strong>{stats.average_discount_rate}%</strong></p></div>}
